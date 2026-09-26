@@ -17,6 +17,12 @@ if (!$PackageExisting -and !(Get-Command cl.exe -ErrorAction SilentlyContinue)) 
 if ($PackageExisting) { $Package=$true }
 $oldPath=$env:PATH
 $env:PATH=(Join-Path $qt 'bin')+';'+$env:PATH
+function Get-BinaryHash([string]$path) {
+    $hash=[System.Security.Cryptography.SHA256]::Create()
+    $stream=[System.IO.File]::OpenRead($path)
+    try { return [BitConverter]::ToString($hash.ComputeHash($stream)).Replace('-','') }
+    finally { $stream.Dispose(); $hash.Dispose() }
+}
 function Invoke-Build([string]$root,[string]$project,[string[]]$Extra) {
     $build=Join-Path $root 'build'
     New-Item -ItemType Directory -Path $build -Force | Out-Null
@@ -85,7 +91,9 @@ try {
         $manifest=@{coreCommit=(& git -C $repo rev-parse HEAD);sdkImageSchema=1; sdkVersion=7;packagedAtUtc=[DateTime]::UtcNow.ToString('o');existingBuild=[bool]$PackageExisting}
         if ($EffectsRoot) { $manifest.effectsCommit=(& git -C $effects rev-parse HEAD) }
         if ($VisualMapRoot) { $manifest.visualMapCommit=(& git -C $visualMap rev-parse HEAD) }
-        $manifest.binarySha256=(Get-FileHash -LiteralPath (Join-Path $dist 'OpenRGB.exe') -Algorithm SHA256).Hash
+        $manifest.binarySha256=Get-BinaryHash (Join-Path $dist 'OpenRGB.exe')
+        if ($EffectsRoot) { $manifest.effectsBinarySha256=Get-BinaryHash (Join-Path $dist 'plugins\OpenRGBEffectsPlugin.dll') }
+        if ($VisualMapRoot) { $manifest.visualMapBinarySha256=Get-BinaryHash (Join-Path $dist 'plugins\OpenRGBVisualMapPlugin.dll') }
         $manifest | ConvertTo-Json | Set-Content -LiteralPath (Join-Path $dist 'BUILD-INFO.json') -Encoding utf8
         Write-Output "Portable local build: $dist (not started)."
     }

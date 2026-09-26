@@ -17,6 +17,8 @@
 #include "ResourceManager.h"
 #include "RGBController_Network.h"
 #include "StringUtils.h"
+#include "FrameRouting/ImageProtocol.h"
+#include <cerrno>
 
 #ifdef _WIN32
 #include <Windows.h>
@@ -95,6 +97,7 @@ NetworkClient::NetworkClient()
     server_controller_ids_requested     = false;
     server_controller_ids_received      = false;
     server_flags                        = 0;
+    server_flags_initialized            = false;
     server_protocol_version             = 0;
     server_reinitialize                 = false;
     change_in_progress                  = false;
@@ -120,6 +123,7 @@ static bool IsCallbackPacket(unsigned int pkt_id)
     {
         case NET_PACKET_ID_REQUEST_CONTROLLER_COUNT:
         case NET_PACKET_ID_REQUEST_CONTROLLER_DATA:
+        case NET_PACKET_ID_REQUEST_IMAGE_OUTPUTS:
         case NET_PACKET_ID_SET_SERVER_FLAGS:
         case NET_PACKET_ID_SET_SERVER_HOSTNAME:
         case NET_PACKET_ID_SET_SERVER_NAME:
@@ -219,6 +223,10 @@ void NetworkClient::ReceiveQueueThreadFunction()
                 ProcessReply_ControllerData(entry.header.pkt_size, entry.data, entry.header.pkt_dev_id);
                 break;
 
+            case NET_PACKET_ID_REQUEST_IMAGE_OUTPUTS:
+                ProcessReply_ImageOutputs(entry.header.pkt_size, entry.data, entry.header.pkt_dev_id);
+                break;
+
             case NET_PACKET_ID_SET_SERVER_FLAGS:
                 ProcessRequest_ServerFlags(entry.header.pkt_size, entry.data);
                 break;
@@ -306,6 +314,242 @@ NetworkClient::~NetworkClient()
 bool NetworkClient::GetConnected()
 {
     return(server_connected);
+}
+
+bool NetworkClient::GetImageOutput(unsigned dev,uint64_t epoch,unsigned zone,room_image::Output& output) const
+{
+    if(!image_capable || epoch!=image_epoch)return false;
+    std::lock_guard<std::mutex> lock(image_mutex);
+    if(!image_capable || epoch!=image_epoch)return false;
+    const auto found=image_outputs.find(dev);
+    if(found==image_outputs.end())return false;
+    for(const auto& value:found->second)if(value.zone==zone){output=value;return true;}
+    return false;
+}
+
+bool NetworkClient::GetImagePreview(unsigned dev,uint64_t epoch,unsigned zone,std::shared_ptr<const room_image::Frame>& frame,
+                                    room_image::Mapping& mapping) const
+{
+    if(!image_capable || epoch!=image_epoch)return false;
+    std::unique_lock<std::mutex> lock(image_mutex,std::try_to_lock);
+    if(!lock.owns_lock() || !image_capable || epoch!=image_epoch)return false;
+    const auto found=image_latest.find({dev,zone});
+    if(found==image_latest.end() || ImageClock::now()>=found->second.expires)return false;
+    frame=found->second.frame;mapping=found->second.mapping;return true;
+}
+
+room_image::SubmitResult NetworkClient::QueueImage(unsigned dev,uint64_t epoch,unsigned zone,
+    std::shared_ptr<const room_image::Frame> frame,const room_image::Mapping& mapping,unsigned lease_ms)
+{
+    if(!frame || !frame->Valid() || frame->pixels->size()>room_image::MaxFrameBytes || !mapping.Valid() || lease_ms<100 || lease_ms>5000)
+        return room_image::SubmitResult::Invalid;
+    if(!image_capable || epoch!=image_epoch || !client_active)return room_image::SubmitResult::Unsupported;
+    std::unique_lock<std::mutex> lock(image_mutex,std::try_to_lock);
+    if(!lock.owns_lock())return room_image::SubmitResult::Busy;
+    if(!image_capable || epoch!=image_epoch)return room_image::SubmitResult::Unsupported;
+    const auto outputs=image_outputs.find(dev);
+    if(outputs==image_outputs.end() || std::none_of(outputs->second.begin(),outputs->second.end(),
+        [zone](const room_image::Output& output){return output.zone==zone;}))return room_image::SubmitResult::Unsupported;
+    const ImageKey key{dev,zone};auto found=image_latest.find(key);
+    const auto previous=found==image_latest.end()?0:found->second.frame->pixels->size();
+    if((found==image_latest.end() && image_latest.size()>=64)
+       || frame->pixels->size()>room_image::MaxFrameBytes-(image_retained_bytes-previous))return room_image::SubmitResult::Busy;
+    auto& entry=image_latest[key];
+    image_retained_bytes=image_retained_bytes-previous+frame->pixels->size();
+    entry.frame=std::move(frame);entry.mapping=mapping;entry.expires=ImageClock::now()+std::chrono::milliseconds(lease_ms);
+    if(!entry.queued){entry.queued=true;image_order.push_back(key);}
+    image_cv.notify_one();return room_image::SubmitResult::Accepted;
+}
+
+void NetworkClient::CancelImages(unsigned dev,uint64_t epoch)
+{
+    if(epoch!=image_epoch)return;
+    std::lock_guard<std::mutex> lock(image_mutex);
+    if(epoch!=image_epoch)return;
+    for(auto it=image_latest.begin();it!=image_latest.end();)
+    {
+        if(it->first.first==dev){image_retained_bytes-=it->second.frame->pixels->size();it=image_latest.erase(it);}
+        else ++it;
+    }
+    image_order.erase(std::remove_if(image_order.begin(),image_order.end(),[dev](const ImageKey& key){return key.first==dev;}),image_order.end());
+    image_cv.notify_one();
+}
+
+void NetworkClient::ResetImages()
+{
+    image_capable=false;++image_epoch;
+    std::lock_guard<std::mutex> lock(image_mutex);
+    image_latest.clear();image_order.clear();image_outputs.clear();image_requests.clear();
+    image_request_order.clear();image_ack_status.clear();image_retained_bytes=0;image_cv.notify_all();
+}
+
+void NetworkClient::RefreshImageSupport()
+{
+    const bool supported=protocol_initialized && protocol_version>=7 && server_flags_initialized
+        && (server_flags&NET_SERVER_FLAG_SUPPORTS_IMAGE_SURFACES);
+    const bool previously_supported=image_capable.exchange(supported);
+    if(!supported)
+    {
+        if(previously_supported)
+        {
+            std::lock_guard<std::mutex> lock(image_mutex);
+            image_latest.clear();image_order.clear();image_outputs.clear();
+            image_requests.clear();image_request_order.clear();image_ack_status.clear();image_retained_bytes=0;
+            image_cv.notify_all();
+        }
+        return;
+    }
+    std::vector<unsigned> ids;
+    { std::lock_guard<std::mutex> lock(ControllerListMutex);
+      for(auto* controller:server_controllers)ids.push_back(static_cast<RGBController_Network*>(controller)->GetID()); }
+    for(unsigned id:ids)RequestImageOutputs(id);
+}
+
+void NetworkClient::RequestImageOutputs(unsigned dev)
+{
+    if(!image_capable)return;
+    std::lock_guard<std::mutex> lock(image_mutex);
+    if(image_requests.size()>=4096 || !image_requests.insert(dev).second)return;
+    image_request_order.push_back(dev);image_cv.notify_one();
+}
+
+void NetworkClient::ProcessReply_ImageOutputs(unsigned int size,unsigned char* data,unsigned dev)
+{
+    if(!image_capable)return;
+    std::vector<room_image::Output> outputs;
+    if(!room_image::wire::DecodeOutputs(data,size,outputs))return;
+    std::lock_guard<std::mutex> controllers_lock(ControllerListMutex);
+    auto* controller=controller_from_id(dev);
+    if(!controller)return;
+    const auto count=controller->GetZoneCount();
+    for(const auto& output:outputs)if(output.zone>=count)return;
+    std::lock_guard<std::mutex> lock(image_mutex);
+    if(!image_capable || !image_requests.count(dev))return;
+    image_outputs[dev]=std::move(outputs);
+}
+
+void NetworkClient::ProcessReply_ImageAck(unsigned int size,unsigned char* data,unsigned dev)
+{
+    if(!image_capable || !data || size!=sizeof(NetPacketAck))return;
+    NetPacketAck ack{};std::memcpy(&ack,data,sizeof(ack));
+    if(ack.acked_pkt_id!=NET_PACKET_ID_RGBCONTROLLER_UPDATE_IMAGE)return;
+    std::lock_guard<std::mutex> lock(image_mutex);
+    if(image_requests.count(dev)){auto& value=image_ack_status[dev];++value.first;value.second=ack.status;}
+}
+
+bool NetworkClient::GetImageAck(unsigned dev,uint64_t& count,unsigned& status) const
+{
+    std::lock_guard<std::mutex> lock(image_mutex);
+    const auto value=image_ack_status.find(dev);
+    if(value==image_ack_status.end())return false;
+    count=value->second.first;status=value->second.second;return true;
+}
+
+bool NetworkClient::SendImagePacket(unsigned dev,unsigned packet_id,const std::vector<uint8_t>& bytes,uint64_t epoch,
+                                     ImageClock::time_point deadline)
+{
+    deadline=std::min(deadline,ImageClock::now()+2s);
+    std::unique_lock<std::mutex> lock(send_in_progress,std::defer_lock);
+    while(!lock.try_lock())
+    {
+        if(!client_active || !image_capable || epoch!=image_epoch || ImageClock::now()>=deadline)return false;
+        std::this_thread::sleep_for(2ms);
+    }
+    if(!client_active || !image_capable || epoch!=image_epoch || ImageClock::now()>=deadline)return false;
+    const SOCKET socket=client_sock;
+    if(socket==INVALID_SOCKET)return false;
+    NetPacketHeader header;InitNetPacketHeader(&header,dev,packet_id,static_cast<unsigned>(bytes.size()));
+#ifdef _WIN32
+    DWORD previous_timeout=0;int option_length=sizeof(previous_timeout);DWORD short_timeout=100;
+#else
+    timeval previous_timeout{};socklen_t option_length=sizeof(previous_timeout);timeval short_timeout{0,100000};
+#endif
+    if(getsockopt(socket,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<char*>(&previous_timeout),&option_length)!=0
+       || setsockopt(socket,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char*>(&short_timeout),sizeof(short_timeout))!=0)return false;
+    bool wrote=false;
+    const auto send_all=[&](const char* data,size_t length)
+    {
+        size_t offset=0;
+        while(offset<length)
+        {
+            if(!client_active || !image_capable || epoch!=image_epoch || ImageClock::now()>=deadline)return false;
+            fd_set writable;FD_ZERO(&writable);FD_SET(socket,&writable);timeval timeout{0,20000};
+            const int ready=select(static_cast<int>(socket)+1,nullptr,&writable,nullptr,&timeout);
+            if(ready==0)continue;
+            if(ready<0)return false;
+            const int result=send(socket,data+offset,static_cast<int>(std::min<size_t>(length-offset,65536)),MSG_NOSIGNAL);
+            if(result>0){offset+=static_cast<size_t>(result);wrote=true;continue;}
+            if(result==0)return false;
+#ifdef _WIN32
+            const int error=WSAGetLastError();
+            if(error==WSAEWOULDBLOCK || error==WSAETIMEDOUT || error==WSAEINTR)continue;
+#else
+            if(errno==EAGAIN || errno==EWOULDBLOCK || errno==EINTR)continue;
+#endif
+            return false;
+        }
+        return true;
+    };
+    const bool complete=send_all(reinterpret_cast<const char*>(&header),sizeof(header))
+        && send_all(reinterpret_cast<const char*>(bytes.data()),bytes.size());
+    setsockopt(socket,SOL_SOCKET,SO_SNDTIMEO,reinterpret_cast<const char*>(&previous_timeout),sizeof(previous_timeout));
+    // A half-written packet cannot be skipped on a TCP byte stream.
+    if(!complete && wrote)shutdown(socket,SD_BOTH);
+    return complete;
+}
+
+void NetworkClient::ImageThreadFunction()
+{
+    while(client_active)
+    {
+        unsigned requested=0;bool request=false;ImageKey key{};ImageEntry entry;uint64_t epoch=0;
+        {
+            std::unique_lock<std::mutex> lock(image_mutex);
+            while(client_active)
+            {
+                const auto now=ImageClock::now();auto wake_at=ImageClock::time_point::max();
+                for(auto it=image_latest.begin();it!=image_latest.end();)
+                {
+                    if(now>=it->second.expires){image_retained_bytes-=it->second.frame->pixels->size();it=image_latest.erase(it);}
+                    else {wake_at=std::min(wake_at,it->second.expires);++it;}
+                }
+                image_order.erase(std::remove_if(image_order.begin(),image_order.end(),[&](const ImageKey& value){return !image_latest.count(value);}),image_order.end());
+                if(image_capable && !image_request_order.empty())
+                {requested=image_request_order.front();image_request_order.pop_front();request=true;break;}
+                bool selected=false;
+                if(image_capable)for(auto it=image_order.begin();it!=image_order.end();++it)
+                {
+                    auto& candidate=image_latest.at(*it);
+                    if(candidate.next_send>now){wake_at=std::min(wake_at,candidate.next_send);continue;}
+                    key=*it;entry=candidate;candidate.queued=false;
+                    unsigned fps=60;
+                    for(const auto& output:image_outputs[key.first])if(output.zone==key.second){fps=output.max_fps?output.max_fps:60;break;}
+                    candidate.next_send=now+std::chrono::milliseconds((1000+fps-1)/fps);
+                    image_order.erase(it);selected=true;break;
+                }
+                if(selected)break;
+                if(wake_at==ImageClock::time_point::max())image_cv.wait(lock);
+                else image_cv.wait_until(lock,wake_at);
+            }
+            if(!client_active)break;
+            epoch=image_epoch;
+        }
+        if(request)
+        {
+            if(!SendImagePacket(requested,NET_PACKET_ID_REQUEST_IMAGE_OUTPUTS,{},epoch,ImageClock::now()+2s))
+            { std::lock_guard<std::mutex> lock(image_mutex);image_requests.erase(requested); }
+            continue;
+        }
+        if(!entry.frame)continue;
+        const auto remaining=std::chrono::duration_cast<std::chrono::milliseconds>(entry.expires-ImageClock::now()).count();
+        if(remaining<100)continue;
+        try
+        {
+            const auto bytes=room_image::wire::EncodeFrame(key.second,*entry.frame,entry.mapping,static_cast<unsigned>(std::min<int64_t>(remaining,5000)));
+            SendImagePacket(key.first,NET_PACKET_ID_RGBCONTROLLER_UPDATE_IMAGE,bytes,epoch,entry.expires);
+        }
+        catch(const std::exception&){LOG_WARNING("[%s] Invalid or unavailable image frame dropped",NETWORKCLIENT);}
+    }
 }
 
 std::string NetworkClient::GetIP()
@@ -446,6 +690,8 @@ void NetworkClient::StartClient()
     port.tcp_client(port_ip.c_str(), port_str);
 
     client_active = true;
+    ResetImages();
+    if(!image_worker.joinable())image_worker=std::thread(&NetworkClient::ImageThreadFunction,this);
 
     /*-----------------------------------------------------*\
     | Start the connection thread                           |
@@ -483,8 +729,9 @@ void NetworkClient::StopClient()
     /*-----------------------------------------------------*\
     | Disconnect the server and set it as inactive          |
     \*-----------------------------------------------------*/
-    server_connected = false;
     client_active    = false;
+    image_capable = false;
+    image_cv.notify_all();
 
     /*-----------------------------------------------------*\
     | Retire this connection's generation so requests still |
@@ -500,24 +747,20 @@ void NetworkClient::StopClient()
     /*-----------------------------------------------------*\
     | Shut down and close the client socket                 |
     \*-----------------------------------------------------*/
-    if(server_connected)
     {
-        shutdown(client_sock, SD_RECEIVE);
-        closesocket(client_sock);
+        // ConnectionThread also owns this lock when replacing the listener.
+        // Stop cannot miss a newly created socket or join the same thread twice.
+        std::lock_guard<std::mutex> lifecycle_lock(listener_lifecycle_mutex);
+        const SOCKET socket=client_sock;
+        if(socket!=INVALID_SOCKET)shutdown(socket,SD_BOTH);
+        server_connected=false;
+        if(ListenThread)
+        {
+            ListenThread->join();delete ListenThread;ListenThread=nullptr;
+        }
     }
-
-    client_active    = false;
-    server_connected = false;
-
-    /*-----------------------------------------------------*\
-    | Close the listen thread                               |
-    \*-----------------------------------------------------*/
-    if(ListenThread)
-    {
-        ListenThread->join();
-        delete ListenThread;
-        ListenThread = nullptr;
-    }
+    if(image_worker.joinable())image_worker.join();
+    ResetImages();
 
     /*-----------------------------------------------------*\
     | Close the ProfileManager listen thread                |
@@ -1715,6 +1958,15 @@ void NetworkClient::ConnectionThreadFunction()
     {
         if(server_connected == false)
         {
+            // Retire the previous listener before replacing its socket handle.
+            {
+                std::lock_guard<std::mutex> lifecycle_lock(listener_lifecycle_mutex);
+                if(ListenThread)
+                {
+                    ListenThread->join();delete ListenThread;ListenThread=nullptr;
+                }
+            }
+            if(!client_active)break;
             /*---------------------------------------------*\
             | Connect to server and reconnect if the        |
             | connection is lost                            |
@@ -1726,7 +1978,9 @@ void NetworkClient::ConnectionThreadFunction()
             \*---------------------------------------------*/
             if(port.tcp_client_connect(connect_timeout) == true)
             {
-                client_sock = port.sock;
+                std::unique_lock<std::mutex> lifecycle_lock(listener_lifecycle_mutex);
+                if(!client_active){port.tcp_close();break;}
+                { std::lock_guard<std::mutex> send_lock(send_in_progress);client_sock = port.sock; }
                 LOG_INFO("[%s] Connected to server", NETWORKCLIENT);
 
                 /*-----------------------------------------*\
@@ -1748,6 +2002,7 @@ void NetworkClient::ConnectionThreadFunction()
                 | Client info has changed, call the         |
                 | callbacks                                 |
                 \*-----------------------------------------*/
+                lifecycle_lock.unlock();
                 SignalNetworkClientUpdate(NETWORKCLIENT_UPDATE_REASON_CLIENT_CONNECTED);
             }
             else
@@ -1841,6 +2096,7 @@ void NetworkClient::ConnectionThreadFunction()
                 SignalNetworkClientUpdate(NETWORKCLIENT_UPDATE_REASON_PROTOCOL_NEGOTIATED);
 
                 protocol_initialized = true;
+                RefreshImageSupport();
             }
 
             /*---------------------------------------------*\
@@ -1979,6 +2235,7 @@ void NetworkClient::ListenThreadFunction()
         NetPacketHeader header;
         int             bytes_read  = 0;
         unsigned char*  data        = NULL;
+        std::unique_ptr<unsigned char[]> packet_data;
         bool            delete_data = true;
 
         for(unsigned int i = 0; i < 4; i++)
@@ -2036,7 +2293,8 @@ void NetworkClient::ListenThreadFunction()
         {
             bytes_read = 0;
 
-            data = new unsigned char[header.pkt_size];
+            packet_data.reset(new unsigned char[header.pkt_size]);
+            data = packet_data.get();
 
             do
             {
@@ -2067,6 +2325,10 @@ void NetworkClient::ListenThreadFunction()
                 ProcessRequest_LogManager_LoggedEntry(header.pkt_size, data);
                 break;
 
+            case NET_PACKET_ID_ACK:
+                ProcessReply_ImageAck(header.pkt_size,data,header.pkt_dev_id);
+                break;
+
             /*---------------------------------------------*\
             | Queue what is not handled inline; the queue   |
             | owns the data.  Running callback packets here |
@@ -2074,6 +2336,7 @@ void NetworkClient::ListenThreadFunction()
             \*---------------------------------------------*/
             case NET_PACKET_ID_REQUEST_CONTROLLER_COUNT:
             case NET_PACKET_ID_REQUEST_CONTROLLER_DATA:
+            case NET_PACKET_ID_REQUEST_IMAGE_OUTPUTS:
             case NET_PACKET_ID_SET_SERVER_FLAGS:
             case NET_PACKET_ID_SET_SERVER_HOSTNAME:
             case NET_PACKET_ID_SET_SERVER_NAME:
@@ -2133,14 +2396,17 @@ void NetworkClient::ListenThreadFunction()
                 break;
         }
 
-        if(delete_data)
-        {
-            delete[] data;
-        }
+        if(!delete_data)packet_data.release();
     }
 
 listen_done:
     LOG_INFO("[%s] Client socket has been closed", NETWORKCLIENT);
+    ResetImages();
+    shutdown(client_sock,SD_BOTH);
+    {
+        std::lock_guard<std::mutex> send_lock(send_in_progress);
+        if(client_sock!=INVALID_SOCKET){closesocket(client_sock);client_sock=INVALID_SOCKET;}
+    }
 
     client_flags_sent                   = false;
     client_is_local_client              = false;
@@ -2257,6 +2523,7 @@ void NetworkClient::ProcessReply_ControllerData(unsigned int data_size, unsigned
         delete new_controller;
     }
 
+    RequestImageOutputs(dev_id);
     controller_data_received = true;
 
     COPY_DATA_ERROR:
@@ -2585,6 +2852,7 @@ void NetworkClient::ProcessRequest_ServerFlags(unsigned int data_size, unsigned 
     }
 
     server_flags_initialized = true;
+    RefreshImageSupport();
 
     SignalNetworkClientUpdate(NETWORKCLIENT_UPDATE_REASON_SERVER_FLAGS_RECEIVED);
 }
@@ -2772,6 +3040,13 @@ void NetworkClient::UpdateDeviceList(RGBController* new_controller)
     \*-----------------------------------------------------*/
     for(std::size_t controller_idx = 0; controller_idx < rgb_controllers_copy.size(); controller_idx++)
     {
+        const unsigned removed_id=static_cast<RGBController_Network*>(rgb_controllers_copy[controller_idx])->GetID();
+        CancelImages(removed_id,image_epoch);
+        {
+            std::lock_guard<std::mutex> image_lock(image_mutex);
+            image_outputs.erase(removed_id);image_requests.erase(removed_id);image_ack_status.erase(removed_id);
+            image_request_order.erase(std::remove(image_request_order.begin(),image_request_order.end(),removed_id),image_request_order.end());
+        }
         delete rgb_controllers_copy[controller_idx];
     }
 }

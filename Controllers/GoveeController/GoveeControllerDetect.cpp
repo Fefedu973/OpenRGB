@@ -18,6 +18,8 @@
 #include "RGBController_Govee.h"
 #include "ResourceManager.h"
 #include "SettingsManager.h"
+#include "GoveeDiscovery.h"
+#include "LogManager.h"
 
 DetectedControllers DetectGoveeControllers()
 {
@@ -32,7 +34,7 @@ DetectedControllers DetectGoveeControllers()
     /*-----------------------------------------------------*\
     | If the Govee settings contains devices, process       |
     \*-----------------------------------------------------*/
-    if(govee_settings.contains("devices"))
+    if(govee_settings.contains("devices") && govee_settings["devices"].is_array())
     {
         GoveeController::ReceiveThreadRun = false;
 
@@ -56,11 +58,26 @@ DetectedControllers DetectGoveeControllers()
 
         for(unsigned int device_idx = 0; device_idx < govee_settings["devices"].size(); device_idx++)
         {
-            if(govee_settings["devices"][device_idx].contains("ip"))
+            const auto& entry = govee_settings["devices"][device_idx];
+            if(entry.is_object() && entry.contains("ip") && entry["ip"].is_string())
             {
-                std::string govee_ip  = govee_settings["devices"][device_idx]["ip"];
+                const std::string govee_ip = entry["ip"];
+                if(!GoveeDiscovery::ValidIPv4(govee_ip)) continue;
+                std::string govee_mac;
+                if(entry.contains("mac"))
+                {
+                    if(!entry["mac"].is_string()) continue;
+                    govee_mac = GoveeDiscovery::NormalizeMac(entry["mac"].get<std::string>());
+                    if(govee_mac.empty()) continue;
+                }
 
-                GoveeController*     controller     = new GoveeController(govee_ip);
+                GoveeController*     controller     = new GoveeController(govee_ip, govee_mac);
+                if(!controller->IsDiscovered())
+                {
+                    LOG_WARNING("[Govee] Configured device %u did not answer discovery; no phantom controller created", device_idx);
+                    delete controller;
+                    continue;
+                }
                 RGBController_Govee* rgb_controller = new RGBController_Govee(controller);
 
                 detected_controllers.push_back(rgb_controller);

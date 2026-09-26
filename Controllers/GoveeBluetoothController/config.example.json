@@ -1,0 +1,19 @@
+{
+  "devices": [
+    {
+      "enabled": false,
+      "profile": "h6008-realtime-v1",
+      "name": "Example bulb - replace private addresses and key path",
+      "address": "02:00:00:00:00:01",
+      "wifi_mac": "02:00:00:00:00:02",
+      "key_file": "C:/private/govee-communication-key.hex"
+    },
+    {
+      "enabled": false,
+      "profile": "h6159-classic-v1",
+      "name": "Example non-addressable strip",
+      "address": "02:00:00:00:00:03",
+      "power_on_acquire": false
+    }
+  ]
+}

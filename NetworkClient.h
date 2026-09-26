@@ -15,6 +15,10 @@
 #include <list>
 #include <mutex>
 #include <queue>
+#include <map>
+#include <set>
+#include <deque>
+#include <chrono>
 #include <thread>
 #include <condition_variable>
 #include "i2c_smbus.h"
@@ -22,6 +26,7 @@
 #include "RGBController.h"
 #include "NetworkProtocol.h"
 #include "net_port.h"
+#include "FrameRouting/RGBControllerImageInterface.h"
 
 /*---------------------------------------------------------*\
 | Callback Types                                            |
@@ -92,6 +97,13 @@ public:
     bool                                GetSupportsSettingsManagerAPI();
     bool                                GetSupportsDetectionAPI();
     bool                                GetSupportsDeviceInfoAPI();
+    bool                                GetSupportsImageAPI() const { return image_capable.load(); }
+    uint64_t                            GetImageEpoch() const { return image_epoch.load(); }
+    bool                                GetImageOutput(unsigned dev, uint64_t epoch, unsigned zone, room_image::Output& output) const;
+    bool                                GetImagePreview(unsigned dev, uint64_t epoch, unsigned zone, std::shared_ptr<const room_image::Frame>& frame, room_image::Mapping& mapping) const;
+    room_image::SubmitResult             QueueImage(unsigned dev, uint64_t epoch, unsigned zone, std::shared_ptr<const room_image::Frame> frame, const room_image::Mapping& mapping, unsigned lease_ms);
+    void                                CancelImages(unsigned dev, uint64_t epoch);
+    bool                                GetImageAck(unsigned dev, uint64_t& count, unsigned& status) const;
 
     /*-----------------------------------------------------*\
     | Client Control functions                              |
@@ -208,6 +220,30 @@ private:
     unsigned int                        requested_controller_index;
     std::mutex                          send_in_progress;
 
+    // Image extension owns one immutable latest frame per output, not a FIFO.
+    // At most 64 active outputs and 64 MiB retained across the connection.
+    using ImageClock = std::chrono::steady_clock;
+    using ImageKey = std::pair<unsigned,unsigned>;
+    struct ImageEntry
+    {
+        std::shared_ptr<const room_image::Frame> frame;
+        room_image::Mapping mapping;
+        ImageClock::time_point expires{}, next_send{};
+        bool queued = false;
+    };
+    mutable std::mutex                  image_mutex;
+    std::condition_variable             image_cv;
+    std::map<ImageKey,ImageEntry>        image_latest;
+    std::deque<ImageKey>                 image_order;
+    std::map<unsigned,std::vector<room_image::Output>> image_outputs;
+    std::set<unsigned>                  image_requests;
+    std::deque<unsigned>                image_request_order;
+    std::map<unsigned,std::pair<uint64_t,unsigned>> image_ack_status;
+    size_t                              image_retained_bytes = 0;
+    std::atomic<bool>                   image_capable{false};
+    std::atomic<uint64_t>               image_epoch{0};
+    std::thread                         image_worker;
+
     /*-----------------------------------------------------*\
     | Every packet the listener does not handle inline.     |
     | Replies are claimed by WaitForResponse, callback      |
@@ -226,7 +262,7 @@ private:
     unsigned int                        client_flags;
     std::string                         client_hostname;
     std::string                         client_name;
-    SOCKET                              client_sock;
+    std::atomic<SOCKET>                 client_sock;
     net_port                            port;
     std::string                         port_ip;
     unsigned short                      port_num;
@@ -252,6 +288,7 @@ private:
     std::mutex                          connection_mutex;
     std::condition_variable             connection_cv;
     std::thread *                       ConnectionThread;
+    std::mutex                          listener_lifecycle_mutex;
     std::thread *                       ListenThread;
     NetworkClientListenerThread*        profilemanager_thread;
 
@@ -304,6 +341,13 @@ private:
     | Private Client functions                              |
     \*-----------------------------------------------------*/
     void                                ProcessReply_ControllerData(unsigned int data_size, unsigned char* data_ptr, unsigned int dev_id);
+    void                                ProcessReply_ImageOutputs(unsigned int size, unsigned char* data, unsigned dev);
+    void                                ProcessReply_ImageAck(unsigned int size, unsigned char* data, unsigned dev);
+    void                                RefreshImageSupport();
+    void                                RequestImageOutputs(unsigned dev);
+    void                                ResetImages();
+    void                                ImageThreadFunction();
+    bool                                SendImagePacket(unsigned dev, unsigned packet_id, const std::vector<uint8_t>& bytes, uint64_t epoch, ImageClock::time_point deadline);
     void                                ProcessReply_ControllerIDs(unsigned int data_size, unsigned char* data_ptr);
     void                                ProcessReply_ProtocolVersion(unsigned int data_size, unsigned char* data_ptr);
     void                                ProcessRequest_DetectionProgressChanged(unsigned int data_size, unsigned char* data_ptr);

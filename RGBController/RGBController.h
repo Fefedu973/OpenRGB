@@ -149,6 +149,7 @@ public:
     | Color Functions                                       |
     \*-----------------------------------------------------*/
     RGBColor                GetColor(unsigned int led);
+    void                    CopyColorsSnapshot(std::vector<RGBColor>& destination);
     RGBColor*               GetColorsPointer();
     void                    SetColor(unsigned int led, RGBColor color);
     void                    SetAllColors(RGBColor color);

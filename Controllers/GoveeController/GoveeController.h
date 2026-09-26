@@ -14,18 +14,22 @@
 #include <string>
 #include <thread>
 #include <vector>
+#include <atomic>
+#include <mutex>
 #include "RGBController.h"
 #include "net_port.h"
 
 class GoveeController
 {
 public:
-    GoveeController(std::string ip);
+    GoveeController(std::string ip, std::string mac = "");
     ~GoveeController();
 
     std::string GetLocation();
     std::string GetSku();
     std::string GetVersion();
+    std::string GetSerial();
+    bool IsDiscovered();
 
     void ReceiveBroadcast(char* recv_buf, int size);
 
@@ -51,7 +55,7 @@ private:
     std::string         wifiVersionHard;
     std::string         wifiVersionSoft;
 
-    bool                broadcast_received;
+    std::atomic<bool>    broadcast_received{false};
 
     net_port            port;
 
@@ -64,6 +68,7 @@ public:
     \*-----------------------------------------------------*/
     static net_port                             broadcast_port;
     static std::vector<GoveeController*>        callbacks;
+    static std::mutex                           callbacks_mutex;
     static std::thread*                         ReceiveThread;
     static std::atomic<bool>                    ReceiveThreadRun;
 

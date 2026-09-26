@@ -11,6 +11,7 @@
 
 #include <QFrame>
 #include "RGBController.h"
+#include "LazyLEDListModel.h"
 
 namespace Ui
 {
@@ -29,6 +30,7 @@ public:
     | Device Functions                                      |
     \*-----------------------------------------------------*/
     RGBController* GetController();
+    void QueueInterfaceUpdate(unsigned int update_reason);
     void SetCustomMode(unsigned char red, unsigned char green, unsigned char blue);
 
     /*-----------------------------------------------------*\
@@ -47,6 +49,7 @@ private:
     | Device pointer                                        |
     \*-----------------------------------------------------*/
     RGBController *device;
+    LazyLEDListModel* led_list_model = nullptr;
 
     /*-----------------------------------------------------*\
     | Current color                                         |
@@ -68,6 +71,7 @@ private:
     | Coalesces rapid ColorChanged() calls into one update   |
     \*-----------------------------------------------------*/
     bool color_update_pending = false;
+    std::atomic<bool> preview_update_pending{false};
 
     /*-----------------------------------------------------*\
     | UI Update Functions                                   |

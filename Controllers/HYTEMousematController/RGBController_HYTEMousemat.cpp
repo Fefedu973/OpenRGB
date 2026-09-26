@@ -90,12 +90,13 @@ void RGBController_HYTEMousemat::DeviceUpdateLEDs()
 
 void RGBController_HYTEMousemat::DeviceUpdateZoneLEDs(int /*zone*/)
 {
-
+    // CNVS accepts complete frames; the sole zone must use the same path.
+    DeviceUpdateLEDs();
 }
 
 void RGBController_HYTEMousemat::DeviceUpdateSingleLED(int /*led*/)
 {
-
+    DeviceUpdateLEDs();
 }
 
 void RGBController_HYTEMousemat::DeviceUpdateMode()

@@ -21,7 +21,31 @@ RGBController_Virtual::RGBController_Virtual(RGBController_Setup* setup)
 
 RGBController_Virtual::~RGBController_Virtual()
 {
+    AttachImageInterface(nullptr);
+    Shutdown();
+}
 
+void RGBController_Virtual::AttachImageInterface(room_image::RGBControllerImageInterface* sink)
+{
+    std::unique_lock<std::shared_mutex> lock(image_sink_mutex);
+    image_sink = sink;
+}
+bool RGBController_Virtual::GetImageOutput(unsigned zone, room_image::Output& output) const
+{
+    std::shared_lock<std::shared_mutex> lock(image_sink_mutex);
+    return image_sink && image_sink->GetImageOutput(zone,output);
+}
+room_image::SubmitResult RGBController_Virtual::SubmitImage(unsigned zone, std::shared_ptr<const room_image::Frame> frame,
+                                                          const room_image::Mapping& mapping, unsigned lease_ms)
+{
+    std::shared_lock<std::shared_mutex> lock(image_sink_mutex);
+    return image_sink ? image_sink->SubmitImage(zone,std::move(frame),mapping,lease_ms) : room_image::SubmitResult::Unsupported;
+}
+bool RGBController_Virtual::GetImagePreview(unsigned zone, std::shared_ptr<const room_image::Frame>& frame,
+                                          room_image::Mapping& mapping) const
+{
+    std::shared_lock<std::shared_mutex> lock(image_sink_mutex);
+    return image_sink && image_sink->GetImagePreview(zone,frame,mapping);
 }
 
 void RGBController_Virtual::SetupLEDs(RGBController_Setup* setup)

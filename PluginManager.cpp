@@ -853,7 +853,8 @@ std::vector<RGBController *> PluginManager::GetRGBControllers()
     {
         if(ActivePlugins[plugin_idx].enabled && ActivePlugins[plugin_idx].loader->isLoaded())
         {
-            plugin_controllers.insert(plugin_controllers.begin(), ((OpenRGBPluginAPI*)ActivePlugins[plugin_idx].api)->rgb_controllers.begin(), ((OpenRGBPluginAPI*)ActivePlugins[plugin_idx].api)->rgb_controllers.end());
+            const auto registered = ((OpenRGBPluginAPI*)ActivePlugins[plugin_idx].api)->GetRegisteredVirtualControllers();
+            plugin_controllers.insert(plugin_controllers.begin(), registered.begin(), registered.end());
         }
     }
 

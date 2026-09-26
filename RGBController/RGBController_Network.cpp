@@ -18,12 +18,23 @@ RGBController_Network::RGBController_Network(NetworkClient * client_ptr, unsigne
 {
     client  = client_ptr;
     dev_id  = dev_id_val;
+    image_epoch = client->GetImageEpoch();
 }
 
 RGBController_Network::~RGBController_Network()
 {
     Shutdown();
 }
+
+bool RGBController_Network::GetImageOutput(unsigned zone,room_image::Output& output) const
+{ return client->GetImageOutput(dev_id,image_epoch,zone,output); }
+
+bool RGBController_Network::GetImagePreview(unsigned zone,std::shared_ptr<const room_image::Frame>& frame,room_image::Mapping& mapping) const
+{ return client->GetImagePreview(dev_id,image_epoch,zone,frame,mapping); }
+
+room_image::SubmitResult RGBController_Network::SubmitImage(unsigned zone,std::shared_ptr<const room_image::Frame> frame,
+                                                           const room_image::Mapping& mapping,unsigned lease_ms)
+{ return client->QueueImage(dev_id,image_epoch,zone,std::move(frame),mapping,lease_ms); }
 
 unsigned int RGBController_Network::GetID()
 {

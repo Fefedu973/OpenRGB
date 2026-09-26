@@ -12,6 +12,8 @@
 #include "DetectionManager.h"
 #include "ElgatoStreamDeckController.h"
 #include "RGBController_ElgatoStreamDeck.h"
+#include "ResourceManager.h"
+#include "SettingsManager.h"
 
 #define ELGATO_VID          0x0FD9
 #define STREAMDECK_MK2_PID  0x0080
@@ -19,6 +21,14 @@
 DetectedControllers DetectElgatoStreamDeckControllers(hid_device_info* info, const std::string&)
 {
     DetectedControllers detected_controllers;
+
+    // Elgato owns the USB handle when its compositor supplies backgrounds.
+    // Do not replace the action icons through the legacy image controller.
+    const json background = ResourceManager::get()->GetSettingsManager()->GetSettings("StreamDeckBackground");
+    if(background.contains("enabled") && background["enabled"].is_boolean() && background["enabled"].get<bool>())
+    {
+        return detected_controllers;
+    }
 
     if(info->interface_number == 0)
     {

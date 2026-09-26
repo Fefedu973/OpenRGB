@@ -12,14 +12,175 @@
 #include "OpenRGBPluginAPI.h"
 #include "RGBController_Dummy.h"
 #include "RGBController_Virtual.h"
+#include <algorithm>
+#include <functional>
+#include <mutex>
+#include <unordered_map>
+#ifndef NO_GUI
+#include <QCoreApplication>
+#include <QThread>
+#endif
+
+// BEGIN VIRTUAL_CONTROLLER_LIFECYCLE
+// Kept independent of the API object's lifetime: queued work owns this state,
+// never a raw `this`. Entries are tombstoned before notifications can re-enter.
+struct OpenRGBVirtualControllerState
+{
+    struct Entry
+    {
+        std::unique_ptr<RGBController_Virtual> controller;
+        std::function<void()> mark_local;
+        uint64_t revision = 0;
+        bool registered = false;
+    };
+    std::recursive_mutex operations;
+    std::mutex mutex;
+    bool alive = true;
+    std::unordered_map<RGBControllerInterface*, std::shared_ptr<Entry>> entries;
+    std::vector<RGBController*> registered;
+};
+
+namespace
+{
+using VirtualState = OpenRGBVirtualControllerState;
+using VirtualEntry = VirtualState::Entry;
+
+// The historical InThread API now means deferred delivery on the application
+// thread. It never spawns a detached worker, nor joins a worker waiting for UI.
+// Without a Qt application (including NO_GUI), operations execute synchronously.
+void DispatchVirtual(const std::shared_ptr<VirtualState>& state,
+                     std::function<void()> operation, bool deferred)
+{
+    auto run = [state, operation = std::move(operation)] {
+        std::lock_guard<std::recursive_mutex> serial(state->operations);
+        operation();
+    };
+#ifndef NO_GUI
+    if(auto* application = QCoreApplication::instance())
+    {
+        if(!QCoreApplication::closingDown())
+        {
+            if(deferred)
+            {
+                QMetaObject::invokeMethod(application, std::move(run), Qt::QueuedConnection);
+                return;
+            }
+            if(QThread::currentThread() != application->thread())
+            {
+                QMetaObject::invokeMethod(application, std::move(run), Qt::BlockingQueuedConnection);
+                return;
+            }
+        }
+    }
+#else
+    (void)deferred;
+#endif
+    run();
+}
+
+std::shared_ptr<VirtualEntry> FindVirtual(const std::shared_ptr<VirtualState>& state,
+                                        RGBControllerInterface* controller)
+{
+    std::lock_guard<std::mutex> lock(state->mutex);
+    const auto found = state->entries.find(controller);
+    return state->alive && found != state->entries.end() ? found->second : nullptr;
+}
+
+void ChangeVirtualRegistration(const std::shared_ptr<VirtualState>& state,
+                               const std::shared_ptr<VirtualEntry>& entry, bool registered)
+{
+    RGBController_Virtual* controller;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if(!state->alive || !entry->controller || entry->registered == registered) return;
+        controller = entry->controller.get();
+        entry->registered = registered;
+        if(registered)
+        {
+            entry->mark_local();
+            state->registered.push_back(controller);
+        }
+        else
+            state->registered.erase(std::remove(state->registered.begin(), state->registered.end(), controller), state->registered.end());
+    }
+    if(!registered) controller->ClearCallbacks();
+    // No state mutex across registry notifications: GetRegisteredVirtualControllers
+    // takes it while ResourceManager already owns DeviceListChangeMutex.
+    ResourceManager::get()->UpdateDeviceList();
+}
+
+void RequestVirtualRegistration(const std::shared_ptr<VirtualState>& state,
+                                RGBControllerInterface* controller, bool registered, bool deferred)
+{
+    std::weak_ptr<VirtualEntry> weak;
+    uint64_t revision;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        const auto found = state->entries.find(controller);
+        if(!state->alive || found == state->entries.end()) return;
+        weak = found->second;
+        revision = ++found->second->revision;
+    }
+    DispatchVirtual(state, [state, weak, revision, registered] {
+        const auto entry = weak.lock();
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            if(!state->alive || !entry || !entry->controller || entry->revision != revision) return;
+        }
+        ChangeVirtualRegistration(state, entry, registered);
+    }, deferred);
+}
+
+void DeleteVirtual(const std::shared_ptr<VirtualState>& state, RGBControllerInterface* controller)
+{
+    std::shared_ptr<VirtualEntry> entry;
+    bool registered;
+    {
+        std::lock_guard<std::mutex> lock(state->mutex);
+        const auto found = state->entries.find(controller);
+        if(found == state->entries.end()) return; // Duplicate delete/stale requests are inert.
+        entry = found->second;
+        ++entry->revision;
+        registered = entry->registered;
+        entry->registered = false;
+        state->entries.erase(found);
+        state->registered.erase(std::remove(state->registered.begin(), state->registered.end(), controller), state->registered.end());
+    }
+    // Revoke all borrowed plugin callbacks before its owner can be unloaded.
+    entry->controller->AttachImageInterface(nullptr);
+    entry->controller->ClearCallbacks();
+    if(registered) ResourceManager::get()->UpdateDeviceList();
+    entry->controller.reset();
+}
+
+void CloseVirtualState(const std::shared_ptr<VirtualState>& state)
+{
+    DispatchVirtual(state, [state] {
+        std::vector<RGBControllerInterface*> controllers;
+        {
+            std::lock_guard<std::mutex> lock(state->mutex);
+            state->alive = false;
+            for(const auto& entry : state->entries) controllers.push_back(entry.first);
+        }
+        for(auto* controller : controllers) DeleteVirtual(state, controller);
+    }, false);
+}
+} // namespace
+// END VIRTUAL_CONTROLLER_LIFECYCLE
 
 OpenRGBPluginAPI::OpenRGBPluginAPI()
+    : virtual_controller_state(std::make_shared<OpenRGBVirtualControllerState>())
 {
     log_manager         = ResourceManager::get()->GetLogManager();
     plugin_manager      = ResourceManager::get()->GetPluginManager();
     profile_manager     = ResourceManager::get()->GetProfileManager();
     resource_manager    = ResourceManager::get();
     settings_manager    = ResourceManager::get()->GetSettingsManager();
+}
+
+OpenRGBPluginAPI::~OpenRGBPluginAPI()
+{
+    CloseVirtualState(virtual_controller_state);
 }
 
 /*---------------------------------------------------------*\
@@ -40,132 +201,88 @@ void OpenRGBPluginAPI::LogEntry(const char* filename, int line, unsigned int lev
 \*---------------------------------------------------------*/
 RGBControllerInterface* OpenRGBPluginAPI::CreateVirtualRGBController(RGBController_Setup* setup)
 {
-    RGBController_Virtual* rgb_controller = new RGBController_Virtual(setup);
-
-    /*-----------------------------------------------------*\
-    | Add the new controller to the list of created         |
-    | controllers                                           |
-    \*-----------------------------------------------------*/
-    created_controllers.push_back((RGBController*)rgb_controller);
-
-    return(rgb_controller);
+    RGBControllerInterface* result = nullptr;
+    const auto state = virtual_controller_state;
+    DispatchVirtual(state, [state, setup, &result] {
+        auto entry = std::make_shared<VirtualEntry>();
+        entry->controller = std::make_unique<RGBController_Virtual>(setup);
+        entry->mark_local = [controller = entry->controller.get()] {
+            controller->flags &= ~CONTROLLER_FLAG_REMOTE;
+            controller->flags |= CONTROLLER_FLAG_LOCAL;
+        };
+        std::lock_guard<std::mutex> lock(state->mutex);
+        if(!state->alive) return;
+        result = entry->controller.get();
+        state->entries.emplace(result, std::move(entry));
+    }, false);
+    return result;
 }
 
-static void CallRegisterVirtualRGBController(OpenRGBPluginAPI* this_ptr, RGBControllerInterface* rgb_controller)
+bool OpenRGBPluginAPI::AttachImageInterface(RGBControllerInterface* controller, room_image::RGBControllerImageInterface* sink)
 {
-    this_ptr->RegisterVirtualRGBController(rgb_controller);
+    bool attached = false;
+    const auto state = virtual_controller_state;
+    const std::weak_ptr<VirtualEntry> weak = FindVirtual(state, controller);
+    DispatchVirtual(state, [state, weak, sink, &attached] {
+        const auto entry = weak.lock();
+        if(!entry || !entry->controller || sink == entry->controller.get()) return;
+        entry->controller->AttachImageInterface(sink);
+        attached = true;
+    }, false);
+    return attached;
 }
 
-void OpenRGBPluginAPI::RegisterVirtualRGBControllerInThread(RGBControllerInterface* rgb_controller)
+void OpenRGBPluginAPI::RegisterVirtualRGBControllerInThread(RGBControllerInterface* controller)
 {
-    /*-----------------------------------------------------*\
-    | To avoid deadlocks if this is called from a UI thread |
-    | run the register operation in a background thread.    |
-    \*-----------------------------------------------------*/
-    std::thread register_thread(CallRegisterVirtualRGBController, this, rgb_controller);
-    register_thread.detach();
+    RequestVirtualRegistration(virtual_controller_state, controller, true, true);
+}
+void OpenRGBPluginAPI::RegisterVirtualRGBController(RGBControllerInterface* controller)
+{
+    RequestVirtualRegistration(virtual_controller_state, controller, true, false);
+}
+void OpenRGBPluginAPI::UnregisterVirtualRGBControllerInThread(RGBControllerInterface* controller)
+{
+    RequestVirtualRegistration(virtual_controller_state, controller, false, true);
+}
+void OpenRGBPluginAPI::UnregisterVirtualRGBController(RGBControllerInterface* controller)
+{
+    RequestVirtualRegistration(virtual_controller_state, controller, false, false);
 }
 
-void OpenRGBPluginAPI::RegisterVirtualRGBController(RGBControllerInterface* rgb_controller)
+void OpenRGBPluginAPI::UpdateVirtualRGBController(RGBControllerInterface* controller, RGBController_Setup* setup)
 {
-    LOG_INFO("[PluginManager] Registering RGB controller %s", rgb_controller->GetName().c_str());
+    const auto state = virtual_controller_state;
+    const std::weak_ptr<VirtualEntry> weak = FindVirtual(state, controller);
+    DispatchVirtual(state, [weak, setup] {
+        const auto entry = weak.lock();
+        if(entry && entry->controller) entry->controller->UpdateVirtualController(setup);
+    }, false);
+}
 
-    /*-----------------------------------------------------*\
-    | Ensure the pointer given is a pointer to a valid      |
-    | virtual controller                                    |
-    \*-----------------------------------------------------*/
-    bool found = false;
-
-    for(std::size_t controller_idx = 0; controller_idx < created_controllers.size(); controller_idx++)
+void OpenRGBPluginAPI::DeleteVirtualRGBController(RGBControllerInterface* controller)
+{
+    const auto state = virtual_controller_state;
+    std::weak_ptr<VirtualEntry> weak;
+    // Invalidate queued registrations immediately, even before a non-GUI caller
+    // reaches the synchronous application-thread dispatch.
     {
-        if(created_controllers[controller_idx] == rgb_controller)
-        {
-            found = true;
-            break;
-        }
+        std::lock_guard<std::mutex> lock(state->mutex);
+        const auto found = state->entries.find(controller);
+        if(found == state->entries.end()) return;
+        weak = found->second;
+        ++found->second->revision;
     }
-
-    if(!found)
-    {
-        LOG_ERROR("[PluginManager] Attempted to register an RGBController that was not created by this plugin API instance.");
-        return;
-    }
-
-    /*-----------------------------------------------------*\
-    | Mark this controller as locally owned                 |
-    \*-----------------------------------------------------*/
-    ((RGBController*)rgb_controller)->flags &= ~CONTROLLER_FLAG_REMOTE;
-    ((RGBController*)rgb_controller)->flags |= CONTROLLER_FLAG_LOCAL;
-
-    /*-----------------------------------------------------*\
-    | Add the new controller to the list                    |
-    \*-----------------------------------------------------*/
-    rgb_controllers.push_back((RGBController*)rgb_controller);
-
-    /*-----------------------------------------------------*\
-    | Signal device list update in ResourceManager          |
-    \*-----------------------------------------------------*/
-    ResourceManager::get()->UpdateDeviceList();
+    DispatchVirtual(state, [state, weak] {
+        const auto entry = weak.lock();
+        if(entry && entry->controller) DeleteVirtual(state, entry->controller.get());
+    }, false);
 }
 
-static void CallUnregisterVirtualRGBController(OpenRGBPluginAPI* this_ptr, RGBControllerInterface* rgb_controller)
+std::vector<RGBController*> OpenRGBPluginAPI::GetRegisteredVirtualControllers() const
 {
-    this_ptr->UnregisterVirtualRGBController(rgb_controller);
-}
-
-void OpenRGBPluginAPI::UnregisterVirtualRGBController(RGBControllerInterface* rgb_controller)
-{
-    LOG_INFO("[PluginManager] Unregistering RGB controller %s", rgb_controller->GetName().c_str());
-
-    /*-----------------------------------------------------*\
-    | Clear callbacks from the controller before removal    |
-    \*-----------------------------------------------------*/
-    rgb_controller->ClearCallbacks();
-
-    /*-----------------------------------------------------*\
-    | Find the controller to remove and remove it from the  |
-    | master list                                           |
-    \*-----------------------------------------------------*/
-    std::vector<RGBController*>::iterator rgb_it = std::find(rgb_controllers.begin(), rgb_controllers.end(), (RGBController*)rgb_controller);
-
-    if(rgb_it != rgb_controllers.end())
-    {
-        rgb_controllers.erase(rgb_it);
-    }
-
-    /*-----------------------------------------------------*\
-    | Signal device list update in ResourceManager          |
-    \*-----------------------------------------------------*/
-    ResourceManager::get()->UpdateDeviceList();
-}
-
-void OpenRGBPluginAPI::UnregisterVirtualRGBControllerInThread(RGBControllerInterface* rgb_controller)
-{
-    /*-----------------------------------------------------*\
-    | To avoid deadlocks if this is called from a UI thread |
-    | run the unregister operation in a background thread.  |
-    \*-----------------------------------------------------*/
-    std::thread unregister_thread(CallUnregisterVirtualRGBController, this, rgb_controller);
-    unregister_thread.detach();
-}
-
-void OpenRGBPluginAPI::UpdateVirtualRGBController(RGBControllerInterface* rgb_controller, RGBController_Setup* setup)
-{
-    if(rgb_controller)
-    {
-        ((RGBController_Virtual*)rgb_controller)->UpdateVirtualController(setup);
-    }
-}
-
-void OpenRGBPluginAPI::DeleteVirtualRGBController(RGBControllerInterface* rgb_controller)
-{
-    /*-----------------------------------------------------*\
-    | Remove the controller from the list of created        |
-    | controllers                                           |
-    \*-----------------------------------------------------*/
-    created_controllers.erase(std::remove(created_controllers.begin(), created_controllers.end(), (RGBController*)rgb_controller), created_controllers.end());
-
-    delete (RGBController*)rgb_controller;
+    const auto state = virtual_controller_state;
+    std::lock_guard<std::mutex> lock(state->mutex);
+    return state->registered;
 }
 
 /*---------------------------------------------------------*\

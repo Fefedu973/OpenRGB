@@ -14,14 +14,21 @@
 #pragma once
 
 #include "RGBController.h"
+#include "FrameRouting/RGBControllerImageInterface.h"
 
-class RGBController_Virtual : public RGBController
+class RGBController_Virtual : public RGBController, public room_image::RGBControllerImageInterface
 {
 public:
     RGBController_Virtual(RGBController_Setup* setup);
     ~RGBController_Virtual();
 
     void                UpdateVirtualController(RGBController_Setup* setup);
+    void                AttachImageInterface(room_image::RGBControllerImageInterface* sink);
+    bool                GetImageOutput(unsigned zone, room_image::Output& output) const override;
+    room_image::SubmitResult SubmitImage(unsigned zone, std::shared_ptr<const room_image::Frame> frame,
+                                        const room_image::Mapping& mapping, unsigned lease_ms) override;
+    bool                GetImagePreview(unsigned zone, std::shared_ptr<const room_image::Frame>& frame,
+                                        room_image::Mapping& mapping) const override;
 
     void                DeviceConfigureZone(int zone_idx);
 
@@ -37,6 +44,8 @@ public:
     void                DeviceUpdateDeviceSpecificZoneConfiguration(int zone);
 
 private:
+    mutable std::shared_mutex image_sink_mutex;
+    room_image::RGBControllerImageInterface* image_sink = nullptr;
     /*-----------------------------------------------------*\
     | Pointer to user object                                |
     \*-----------------------------------------------------*/

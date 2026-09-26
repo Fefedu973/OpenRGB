@@ -12,6 +12,7 @@
 #pragma once
 
 #include <QWidget>
+#include <QImage>
 #include "RGBController.h"
 
 typedef struct
@@ -98,6 +99,8 @@ private:
     | UI element tracking variables                         |
     \*-----------------------------------------------------*/
     std::vector<QString>                led_labels;
+    std::vector<RGBColor>               preview_colors;
+    QImage                             preview_raster;
     std::vector<matrix_pos_size_type>   led_pos;
     std::vector<matrix_pos_size_type>   segment_pos;
     std::vector<matrix_pos_size_type>   zone_pos;
@@ -112,6 +115,7 @@ private:
     \*-----------------------------------------------------*/
     void InitDeviceView();
     void UpdateSelection();
+    QRect LEDRect(unsigned int led_idx) const;
 
 signals:
     /*-----------------------------------------------------*\

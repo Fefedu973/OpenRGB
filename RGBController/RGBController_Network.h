@@ -15,13 +15,16 @@
 #include "RGBController.h"
 #include "NetworkClient.h"
 
-class RGBController_Network : public RGBController
+class RGBController_Network : public RGBController, public room_image::RGBControllerImageInterface
 {
 public:
     RGBController_Network(NetworkClient * client_ptr, unsigned int dev_idx_val);
     ~RGBController_Network();
 
     unsigned int    GetID();
+    bool            GetImageOutput(unsigned zone, room_image::Output& output) const override;
+    bool            GetImagePreview(unsigned zone, std::shared_ptr<const room_image::Frame>& frame, room_image::Mapping& mapping) const override;
+    room_image::SubmitResult SubmitImage(unsigned zone, std::shared_ptr<const room_image::Frame> frame, const room_image::Mapping& mapping, unsigned lease_ms = 1000) override;
 
     void            SetHidden(bool hidden);
 
@@ -57,6 +60,7 @@ public:
 private:
     NetworkClient * client;
     unsigned int    dev_id;
+    uint64_t        image_epoch;
 
     unsigned char * CreateUpdateLEDsPacket(unsigned int protocol_version);
     unsigned char * CreateUpdateModePacket(int mode_idx, unsigned int* size, unsigned int protocol_version);

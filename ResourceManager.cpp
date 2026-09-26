@@ -29,6 +29,7 @@
 #include "NetworkClient.h"
 #include "NetworkServer.h"
 #include "filesystem.h"
+#include "Controllers/VirtualScreenController/VirtualScreenController.h"
 
 /*---------------------------------------------------------*\
 | Put these last to avoid some include order issues         |
@@ -933,6 +934,7 @@ void ResourceManager::ServiceShutdown()
 
 void ResourceManager::RescanDevices()
 {
+    if(virtual_only) return; // This mode never escalates into a hardware scan.
     /*-----------------------------------------------------*\
     | If automatic local connection is active, the primary  |
     | instance is the local server, so send rescan requests |
@@ -1290,7 +1292,7 @@ void ResourceManager::Initialize(bool tryConnect, bool detectDevices, bool start
     \*-----------------------------------------------------*/
     json client_settings            = settings_manager->GetSettings("Client");
 
-    if(client_settings.contains("clients"))
+    if(!virtual_only && client_settings.contains("clients"))
     {
         for(unsigned int client_idx = 0; client_idx < client_settings["clients"].size(); client_idx++)
         {
@@ -1368,7 +1370,13 @@ void ResourceManager::Initialize(bool tryConnect, bool detectDevices, bool start
     /*-----------------------------------------------------*\
     | Perform actual detection if enabled                   |
     \*-----------------------------------------------------*/
-    if(detection_enabled)
+    if(virtual_only)
+    {
+        DetectionManager::get()->RegisterDetectionCallback(ResourceManagerDetectionCallback, this);
+        for(auto* controller : DetectVirtualScreenControllers())
+            DetectionManager::get()->RegisterRGBController(controller);
+    }
+    else if(detection_enabled)
     {
         LOG_DEBUG("[%s] Local OpenRGB server not found, running in standalone mode", RESOURCEMANAGER);
 

@@ -52,6 +52,10 @@ static std::map<std::string, GoveeDeviceInfo> govee_device_info
     { "H6022",   { 132, GOVEE_ZONE_SERPENTINE, 12, 0,  true } },    // Govee Smart Table Lamp 2
     { "H6046",   { 20,  GOVEE_ZONE_SPLIT_BARS, 0,  10, true } },    // Govee RGBIC Gaming Light Bars - two 10-LED bars, right then left
     { "H612F",   { 12,  GOVEE_ZONE_LINEAR,     0,  0,  true } },    // Govee Strip Light S (3m)
+    { "H61E1",   { 30,  GOVEE_ZONE_LINEAR,     0,  0,  true } },    // M1 strip: 30 controllable segments
+    { "H61A0",   { 25,  GOVEE_ZONE_LINEAR,     0,  0,  true } },    // 3m neon rope: 25 controllable segments
+    { "H61A2",   { 42,  GOVEE_ZONE_LINEAR,     0,  0,  true } },    // 5m neon rope: 42 controllable segments
+    { "H6062",   { 57,  GOVEE_ZONE_LINEAR,     0,  0,  true } },    // Glide: six 9-segment bars plus 3-segment corner
     { "H619A",   { 20,  GOVEE_ZONE_LINEAR,     0,  0,  true } },    // Govee RGBIC Led Strip Lights
     { "H70B1",   { 20,  GOVEE_ZONE_LINEAR,     0,  0,  true } },    // Govee LED Curtain Lights
     { "H607C",   { 174, GOVEE_ZONE_LINEAR,     0,  0,  true } },    // Govee Floor Lamp 2
@@ -76,6 +80,7 @@ RGBController_Govee::RGBController_Govee(GoveeController* controller_ptr)
     type        = DEVICE_TYPE_LIGHT;
     description = "Govee Device";
     location    = controller->GetLocation();
+    serial      = controller->GetSerial();
     version     = controller->GetVersion();
 
     mode Static;

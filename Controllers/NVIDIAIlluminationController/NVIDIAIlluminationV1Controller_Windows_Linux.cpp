@@ -10,6 +10,7 @@
 \*---------------------------------------------------------*/
 
 #include "NVIDIAIlluminationV1Controller_Windows_Linux.h"
+#include "NVIDIAIlluminationColor.h"
 
 NVIDIAIlluminationV1Controller::NVIDIAIlluminationV1Controller(nvapi_accessor* nvapi_ptr, bool treats_rgbw_as_rgb, std::string dev_name)
 {
@@ -160,11 +161,13 @@ void NVIDIAIlluminationV1Controller::setZone(uint8_t zone, uint8_t mode, NVIDIAI
             }
             else if(zone_params.zones[zone].type == NV_GPU_CLIENT_ILLUM_ZONE_TYPE_SINGLE_COLOR)
             {
-                zone_params.zones[zone].data.singleColor.data.manualSingleColor.singleColorParams.brightnessPct = allZero({red, green, blue, white}) ? 0 : zone_config.brightness;
+                zone_params.zones[zone].data.singleColor.data.manualSingleColor.singleColorParams.brightnessPct =
+                    NVIDIAIlluminationColor::MonochromeBrightness(red, green, blue, zone_config.brightness);
             }
             else if(zone_params.zones[zone].type == NV_GPU_CLIENT_ILLUM_ZONE_TYPE_COLOR_FIXED)
             {
-                zone_params.zones[zone].data.colorFixed.data.manualColorFixed.colorFixedParams.brightnessPct = allZero({red, green, blue, white}) ? 0 : zone_config.brightness;
+                zone_params.zones[zone].data.colorFixed.data.manualColorFixed.colorFixedParams.brightnessPct =
+                    NVIDIAIlluminationColor::MonochromeBrightness(red, green, blue, zone_config.brightness);
             }
             break;
     }

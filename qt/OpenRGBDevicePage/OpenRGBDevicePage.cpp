@@ -8,6 +8,7 @@
 \*---------------------------------------------------------*/
 
 #include <QTimer>
+#include <QListView>
 
 #include "OpenRGBDevicePage.h"
 #include "OpenRGBDeviceEditorDialog.h"
@@ -16,6 +17,7 @@
 #include "ResourceManager.h"
 #include "SettingsManager.h"
 #include "ui_OpenRGBDevicePage.h"
+#include "ImageOutputView.h"
 
 static void OpenRGBDevicePageSettingsManagerCallback(void * this_ptr, unsigned int update_reason)
 {
@@ -33,7 +35,7 @@ static void UpdateCallback(void * this_ptr, unsigned int update_reason, void * /
 {
     OpenRGBDevicePage * this_obj = (OpenRGBDevicePage *)this_ptr;
 
-    QMetaObject::invokeMethod(this_obj, "UpdateInterface", Qt::QueuedConnection, Q_ARG(unsigned int, update_reason));
+    this_obj->QueueInterfaceUpdate(update_reason);
 }
 
 OpenRGBDevicePage::OpenRGBDevicePage(RGBController *dev, QWidget *parent) :
@@ -41,11 +43,19 @@ OpenRGBDevicePage::OpenRGBDevicePage(RGBController *dev, QWidget *parent) :
     ui(new Ui::OpenRGBDevicePage)
 {
     ui->setupUi(this);
+    led_list_model = ConfigureLazyLEDComboBox(ui->LEDBox);
 
     /*-----------------------------------------------------*\
     | Store device pointer                                  |
     \*-----------------------------------------------------*/
     device = dev;
+    // Optional native image outputs are independent of the legacy LED matrix.
+    // Query the capability, never a vendor/model or fixed screen dimension.
+    auto* image_outputs = new ImageOutputView(device,this);
+    if(image_outputs->HasOutputs())
+        ui->OpenRGBDevicePageUiGridLayout->addWidget(image_outputs,2,0,1,2);
+    else
+        delete image_outputs;
 
     /*-----------------------------------------------------*\
     | Register update callback with the device              |
@@ -97,6 +107,24 @@ OpenRGBDevicePage::OpenRGBDevicePage(RGBController *dev, QWidget *parent) :
     | Update LED UI                                         |
     \*-----------------------------------------------------*/
     UpdateLEDUi();
+
+    // LED packets can arrive much faster than a useful GUI refresh. One dirty
+    // flag per page avoids an event backlog, including for hidden device pages.
+    auto* preview_timer = new QTimer(this);
+    preview_timer->setInterval(33);
+    connect(preview_timer, &QTimer::timeout, this, [this]{
+        if(ui->DeviceViewBox->isVisible() && preview_update_pending.exchange(false))
+            ui->DeviceViewBox->update();
+    });
+    preview_timer->start();
+}
+
+void OpenRGBDevicePage::QueueInterfaceUpdate(unsigned int update_reason)
+{
+    if(update_reason == RGBCONTROLLER_UPDATE_REASON_UPDATELEDS)
+        preview_update_pending.store(true);
+    else
+        QMetaObject::invokeMethod(this, "UpdateInterface", Qt::QueuedConnection, Q_ARG(unsigned int, update_reason));
 }
 
 OpenRGBDevicePage::~OpenRGBDevicePage()
@@ -517,10 +545,9 @@ void OpenRGBDevicePage::UpdateLEDList()
                 | Fill in the LED list with all LEDs in the |
                 | device                                    |
                 \*-----------------------------------------*/
-                for(unsigned int i = 0; i < device->GetLEDCount(); i++)
-                {
-                    ui->LEDBox->addItem(device->GetLEDDisplayName((unsigned int)i).c_str());
-                }
+                led_list_model->AppendRange(device->GetLEDCount(), [this](unsigned i){
+                    return QString::fromStdString(device->GetLEDDisplayName(i));
+                });
 
                 /*-----------------------------------------*\
                 | Enable editing if controller has any      |
@@ -573,10 +600,10 @@ void OpenRGBDevicePage::UpdateLEDList()
                 | Fill in the LED list with all LEDs in the |
                 | zone                                      |
                 \*-----------------------------------------*/
-                for(std::size_t led_idx = 0; led_idx < leds_in_zone; led_idx++)
-                {
-                    ui->LEDBox->addItem(device->GetLEDName(device->GetZoneStartIndex(selected_zone) + (unsigned int)led_idx).c_str());
-                }
+                const unsigned zone_start = device->GetZoneStartIndex(selected_zone);
+                led_list_model->AppendRange(leds_in_zone, [this, zone_start](unsigned i){
+                    return QString::fromStdString(device->GetLEDName(zone_start+i));
+                });
 
                 /*-----------------------------------------*\
                 | Enable editing if zone has any            |
@@ -627,10 +654,10 @@ void OpenRGBDevicePage::UpdateLEDList()
                 | Fill in the LED list with all LEDs in the |
                 | segment                                   |
                 \*-----------------------------------------*/
-                for(std::size_t led_idx = 0; led_idx < device->GetZoneSegmentLEDsCount(selected_zone, selected_segment); led_idx++)
-                {
-                    ui->LEDBox->addItem(device->GetLEDName(device->GetZoneStartIndex(selected_zone) + device->GetZoneSegmentStartIndex(selected_zone, selected_segment) + (unsigned int)led_idx).c_str());
-                }
+                const unsigned segment_start = device->GetZoneStartIndex(selected_zone) + device->GetZoneSegmentStartIndex(selected_zone, selected_segment);
+                led_list_model->AppendRange(device->GetZoneSegmentLEDsCount(selected_zone, selected_segment), [this, segment_start](unsigned i){
+                    return QString::fromStdString(device->GetLEDName(segment_start+i));
+                });
 
                 /*-----------------------------------------*\
                 | Editing is not allowed when a segment is  |

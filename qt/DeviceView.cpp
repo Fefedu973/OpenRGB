@@ -15,6 +15,8 @@
 #include <QtCore/qmath.h>
 #include <QDebug>
 #include <QMouseEvent>
+#include <cmath>
+#include <limits>
 #include "DeviceView.h"
 #include "ResourceManager.h"
 #include "RGBControllerKeyNames.h"
@@ -231,6 +233,11 @@ DeviceView::DeviceView(QWidget *parent) :
     numerical_labels    = false;
     per_led             = true;
     size                = width();
+    matrix_h            = 0;
+    offset_x            = 0;
+    disable_expansion   = false;
+    ctrl_down           = false;
+    mouse_moved         = false;
 
     /*-----------------------------------------------------*\
     | Enable mouse tracking                                 |
@@ -313,9 +320,10 @@ bool DeviceView::SelectLEDs(std::vector<unsigned int> leds)
     /*-----------------------------------------------------*\
     | Check validity                                        |
     \*-----------------------------------------------------*/
+    const unsigned int led_count = controller->GetLEDCount();
     for(std::size_t led_idx = 0; led_idx < leds.size(); led_idx++)
     {
-        if(leds[led_idx] >= controller->GetLEDCount())
+        if(leds[led_idx] >= led_count)
         {
             return(false);
         }
@@ -325,11 +333,11 @@ bool DeviceView::SelectLEDs(std::vector<unsigned int> leds)
     | Set selection                                         |
     \*-----------------------------------------------------*/
     selection_flags.clear();
-    selection_flags.resize(controller->GetLEDCount());
+    selection_flags.resize(led_count);
 
     for(std::size_t led_idx = 0; led_idx < leds.size(); led_idx++)
     {
-        selection_flags[led_idx] = 1;
+        selection_flags[leds[led_idx]] = 1;
     }
 
     /*-----------------------------------------------------*\
@@ -867,7 +875,7 @@ void DeviceView::resizeEvent(QResizeEvent* /*event*/)
     update();
 }
 
-void DeviceView::paintEvent(QPaintEvent* /* event */)
+void DeviceView::paintEvent(QPaintEvent* event)
 {
     /*-----------------------------------------------------*\
     | Verify controller exists                              |
@@ -921,27 +929,70 @@ void DeviceView::paintEvent(QPaintEvent* /* event */)
     /*-----------------------------------------------------*\
     | Paint LED rectangles                                  |
     \*-----------------------------------------------------*/
-    for(unsigned int led_idx = 0; led_idx < controller->GetLEDCount(); led_idx++)
+    controller->CopyColorsSnapshot(preview_colors);
+    const unsigned int preview_count = static_cast<unsigned int>(std::min(led_pos.size(), preview_colors.size()));
+    // Small opaque rectangles do not need one QPainter call per LED. Rasterize
+    // only the currently visible paint region, keeping at most 16 MiB. Flush
+    // before any normal/transparent LED so mixed layouts retain drawing order.
+    const QRect raster_region = event->rect().intersected(rect()).intersected(visibleRegion().boundingRect());
+    const bool use_raster = preview_count > 4096 && !raster_region.isEmpty()
+        && static_cast<qint64>(raster_region.width()) * raster_region.height() <= 4 * 1024 * 1024;
+    bool raster_initialized = false;
+    bool raster_dirty = false;
+    auto flush_raster = [&]
+    {
+        if(!raster_dirty) return;
+        painter.drawImage(raster_region.topLeft(), preview_raster);
+        preview_raster.fill(Qt::transparent);
+        raster_dirty = false;
+    };
+    const QColor selection_color = palette().highlight().color();
+    for(unsigned int led_idx = 0; led_idx < preview_count; led_idx++)
     {
         /*-------------------------------------------------*\
         | Determine position and size                       |
         \*-------------------------------------------------*/
-        int posx                = led_pos[led_idx].matrix_x * size + offset_x;
-        int posy                = led_pos[led_idx].matrix_y * size;
-        int posw                = led_pos[led_idx].matrix_w * size;
-        int posh                = led_pos[led_idx].matrix_h * size;
-
-        /*-------------------------------------------------*\
-        | Create rect                                       |
-        \*-------------------------------------------------*/
-        QRect rect              = {posx, posy, posw, posh};
+        const QRect rect = LEDRect(led_idx);
+        if(rect.isEmpty() || !rect.intersects(event->rect())) continue;
+        const int posw = rect.width();
+        const int posh = rect.height();
 
         /*-------------------------------------------------*\
         | Set Fill color                                    |
         \*-------------------------------------------------*/
-        QColor currentColor     = QColor::fromRgb(RGBGetRValue(controller->GetColor(led_idx)),
-                                                  RGBGetGValue(controller->GetColor(led_idx)),
-                                                  RGBGetBValue(controller->GetColor(led_idx)));
+        const RGBColor packed   = preview_colors[led_idx];
+        QColor currentColor     = QColor::fromRgb(RGBGetRValue(packed), RGBGetGValue(packed), RGBGetBValue(packed));
+        if(posw < 5 || posh < 5)
+        {
+            const QColor color = selection_flags[led_idx] ? selection_color : currentColor;
+            if(use_raster && color.alpha() == 255)
+            {
+                if(!raster_initialized)
+                {
+                    if(preview_raster.size() != raster_region.size())
+                        preview_raster = QImage(raster_region.size(), QImage::Format_ARGB32_Premultiplied);
+                    if(!preview_raster.isNull()) preview_raster.fill(Qt::transparent);
+                    raster_initialized = true;
+                }
+                if(!preview_raster.isNull())
+                {
+                    const QRect clipped = rect.intersected(raster_region);
+                    const QRgb pixel = color.rgba(); // opaque, already premultiplied
+                    for(int row_index = clipped.top(); row_index <= clipped.bottom(); ++row_index)
+                    {
+                        auto* row = reinterpret_cast<QRgb*>(preview_raster.scanLine(row_index - raster_region.top()));
+                        std::fill(row + clipped.left() - raster_region.left(),
+                                  row + clipped.right() - raster_region.left() + 1, pixel);
+                    }
+                    raster_dirty = raster_dirty || !clipped.isEmpty();
+                    continue;
+                }
+            }
+            flush_raster();
+            painter.fillRect(rect, color);
+            continue;
+        }
+        flush_raster();
         painter.setBrush(currentColor);
 
         /*-------------------------------------------------*\
@@ -960,6 +1011,9 @@ void DeviceView::paintEvent(QPaintEvent* /* event */)
         | Draw LED rectangle                                |
         \*-------------------------------------------------*/
         painter.drawRect(rect);
+
+        // Subpixel labels are illegible and dominate painting large matrices.
+        if(posw < 14 || posh < 14) continue;
 
         /*-------------------------------------------------*\
         | LED Label                                         |
@@ -986,8 +1040,17 @@ void DeviceView::paintEvent(QPaintEvent* /* event */)
         /*-------------------------------------------------*\
         | Draw LED label on LED rectangle                   |
         \*-------------------------------------------------*/
-        painter.drawText(rect, Qt::AlignVCenter | Qt::AlignHCenter, QString(led_labels[led_idx]));
+        QString label;
+        if(!led_labels.empty()) label = led_labels[led_idx];
+        else if(numerical_labels) label = QString::number(led_idx);
+        else
+        {
+            const auto found = led_label_lookup.find(controller->GetLEDDisplayName(led_idx));
+            if(found != led_label_lookup.end()) label = found->second.label_utf8;
+        }
+        if(!label.isEmpty()) painter.drawText(rect, Qt::AlignVCenter | Qt::AlignHCenter, label);
     }
+    flush_raster();
 
     /*-----------------------------------------------------*\
     | Change font size for drawing zone and segment names   |
@@ -1129,7 +1192,8 @@ void DeviceView::InitDeviceView()
     \*-----------------------------------------------------*/
     zone_pos.resize(controller->GetZoneCount());
     led_pos.resize(controller->GetLEDCount());
-    led_labels.resize(controller->GetLEDCount());
+    // Large devices compute only labels that can actually be seen.
+    led_labels.resize(controller->GetLEDCount() > 4096 ? 0 : controller->GetLEDCount());
 
     /*-----------------------------------------------------*\
     | Process position and size for zones                   |
@@ -1421,7 +1485,7 @@ void DeviceView::InitDeviceView()
     /*-----------------------------------------------------*\
     | Update LED labels                                     |
     \*-----------------------------------------------------*/
-    for(unsigned int led_idx = 0; led_idx < controller->GetLEDCount(); led_idx++)
+    for(unsigned int led_idx = 0; led_idx < led_labels.size(); led_idx++)
     {
         std::map<std::string, led_label>::const_iterator it = led_label_lookup.find(controller->GetLEDDisplayName((unsigned int)led_idx));
 
@@ -1446,7 +1510,7 @@ void DeviceView::InitDeviceView()
     | thing becomes too tall, we ignore it and let the view |
     | widget take care of it                                |
     \*-----------------------------------------------------*/
-    float atom = 1.0f / max_width;
+    float atom = max_width ? 1.0f / max_width : 0.0f;
 
     for(std::size_t zone_idx = 0; zone_idx < zone_pos.size(); zone_idx++)
     {
@@ -1487,6 +1551,26 @@ void DeviceView::InitDeviceView()
     }
 }
 
+QRect DeviceView::LEDRect(unsigned int led_idx) const
+{
+    if(led_idx >= led_pos.size() || size <= 0) return QRect();
+    const auto& led = led_pos[led_idx];
+    if(!(led.matrix_w > 0) || !(led.matrix_h > 0)) return QRect();
+    const double x = led.matrix_x * size + offset_x;
+    const double y = led.matrix_y * size;
+    const double w = led.matrix_w * size;
+    const double h = led.matrix_h * size;
+    const double lo = std::numeric_limits<int>::min();
+    const double hi = std::numeric_limits<int>::max();
+    if(!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(w) || !std::isfinite(h)
+       || x < lo || y < lo || x > hi || y > hi || w > hi || h > hi
+       || x + std::max(1.0, w) - 1 > hi || y + std::max(1.0, h) - 1 > hi) return QRect();
+    // Positive geometry remains visible and selectable even below one pixel.
+    // Zero/negative/invalid geometry stays absent; it must not become a hit.
+    return QRect(static_cast<int>(x), static_cast<int>(y),
+                 std::max(1, static_cast<int>(w)), std::max(1, static_cast<int>(h)));
+}
+
 void DeviceView::UpdateSelection()
 {
     /*-----------------------------------------------------*\
@@ -1509,25 +1593,21 @@ void DeviceView::UpdateSelection()
     \*-----------------------------------------------------*/
     QRect sel = selection_rect.normalized();
 
-    for(unsigned int led_idx = 0; led_idx < controller->GetLEDCount(); led_idx++)
+    const std::size_t count = std::min(led_pos.size(), selection_flags.size());
+    for(unsigned int led_idx = 0; led_idx < count; led_idx++)
     {
         /*-------------------------------------------------*\
         | Check intersection                                |
         \*-------------------------------------------------*/
-        int posx = led_pos[led_idx].matrix_x * size + offset_x;
-        int posy = led_pos[led_idx].matrix_y * size;
-        int posw = led_pos[led_idx].matrix_w * size;
-        int posh = led_pos[led_idx].matrix_h * size;
-
-        QRect rect = {posx, posy, posw, posh};
+        const QRect rect = LEDRect(led_idx);
 
         selection_flags[led_idx] = 0;
 
-        if(sel.intersects(rect))
+        if(!rect.isEmpty() && sel.intersects(rect))
         {
             selection_flags[led_idx] = 1;
         }
-        if(ctrl_down)
+        if(ctrl_down && led_idx < previous_flags.size())
         {
             selection_flags[led_idx] = selection_flags[led_idx] ^ previous_flags[led_idx];
         }

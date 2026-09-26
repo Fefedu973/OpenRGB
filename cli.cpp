@@ -448,6 +448,7 @@ void OptionHelp()
     help_text += "--localconfig                            Use the current working directory instead of the global configuration directory.\n";
     help_text += "--config path                            Use a custom path instead of the global configuration directory.\n";
     help_text += "--nodetect                               Do not try to detect hardware at startup.\n";
+    help_text += "--virtual-only                           Load configured image surfaces without hardware detection or autoconnect.\n";
     help_text += "--noautoconnect                          Do not try to autoconnect to a local server at startup.\n";
     help_text += "--loglevel [0-6 | error | warning ...]   Set the log level (0: fatal to 6: trace).\n";
     help_text += "--print-source                           Print the source code file and line number for each log entry.\n";
@@ -1161,6 +1162,7 @@ int ProcessOptions(Options* options, std::vector<RGBController *>& rgb_controlle
         {
             if((option == "--localconfig")
              ||(option == "--nodetect")
+             ||(option == "--virtual-only")
              ||(option == "--noautoconnect")
              ||(option == "--server")
              ||(option == "--gui")
@@ -1438,6 +1440,12 @@ unsigned int cli_pre_detection(int argc, char* argv[])
         /*-------------------------------------------------*\
         | --nodetect                                        |
         \*-------------------------------------------------*/
+        else if(option == "--virtual-only")
+        {
+            ResourceManager::get()->SetVirtualOnly(true);
+            ret_flags |= RET_FLAG_NO_DETECT | RET_FLAG_NO_AUTO_CONNECT;
+            cfg_args++;
+        }
         else if(option == "--nodetect")
         {
             ret_flags              |= RET_FLAG_NO_DETECT;

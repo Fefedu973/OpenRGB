@@ -1,0 +1,27 @@
+{
+  "VirtualScreens": {
+    "enabled": false,
+    "outputs": [
+      {
+        "id": "screen-one",
+        "name": "Virtual Screen One",
+        "width": 800,
+        "height": 600,
+        "channel": "room-screen-one",
+        "fps": 30,
+        "compatibility_width": 32,
+        "compatibility_height": 18
+      },
+      {
+        "id": "screen-two",
+        "name": "Virtual Screen Two",
+        "width": 1280,
+        "height": 720,
+        "channel": "room-screen-two",
+        "fps": 30,
+        "compatibility_width": 32,
+        "compatibility_height": 18
+      }
+    ]
+  }
+}

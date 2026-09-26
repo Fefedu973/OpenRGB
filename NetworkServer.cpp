@@ -11,11 +11,14 @@
 
 #include <cstring>
 #include <queue>
+#include <memory>
+#include <new>
 #include "i2c_smbus.h"
 #include "JsonUtils.h"
 #include "LogManager.h"
 #include "NetworkServer.h"
 #include "StringUtils.h"
+#include "FrameRouting/ImageProtocol.h"
 
 #ifndef _WIN32
 #include <sys/ioctl.h>
@@ -43,6 +46,29 @@ const char yes = 1;
 #endif
 
 using namespace std::chrono_literals;
+
+namespace
+{
+// Bound aggregate in-flight image payloads even when several TCP peers stall.
+std::atomic<size_t> image_receive_bytes{0};
+class ImageReceiveReservation
+{
+    size_t bytes = 0;
+public:
+    bool Acquire(size_t requested)
+    {
+        const size_t limit = 2ull * room_image::wire::MaxPacketBytes;
+        size_t current = image_receive_bytes.load();
+        do
+        {
+            if(requested > limit - current) return false;
+        } while(!image_receive_bytes.compare_exchange_weak(current, current + requested));
+        bytes = requested;
+        return true;
+    }
+    ~ImageReceiveReservation() { if(bytes) image_receive_bytes.fetch_sub(bytes); }
+};
+}
 
 /*---------------------------------------------------------*\
 | Macros for copying data fields from set descriptor buffer |
@@ -1220,6 +1246,8 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
         unsigned char*  data        = NULL;
         bool            delete_data = true;
         NetPacketStatus status      = NET_PACKET_STATUS_OK;
+        std::unique_ptr<unsigned char[]> receive_buffer;
+        ImageReceiveReservation image_reservation;
 
         for(unsigned int i = 0; i < 4; i++)
         {
@@ -1269,20 +1297,38 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
         | Header received, now receive the data             |
         \*-------------------------------------------------*/
         bytes_read = 0;
-        if(header.pkt_size > OPENRGB_SDK_MAX_PACKET_SIZE)
+        if(header.pkt_size > ((client_info->client_protocol_version >= 7 &&
+                              header.pkt_id == NET_PACKET_ID_RGBCONTROLLER_UPDATE_IMAGE)
+                             ? room_image::wire::MaxPacketBytes : OPENRGB_SDK_MAX_PACKET_SIZE))
         {
             LOG_ERROR("[%s] received too large packet, closing listener", NETWORKSERVER);
             goto listen_done;
         }
         else if(header.pkt_size > 0)
         {
-            data = new unsigned char[header.pkt_size];
+            const bool image_packet = header.pkt_id == NET_PACKET_ID_RGBCONTROLLER_UPDATE_IMAGE;
+            if(image_packet && !image_reservation.Acquire(header.pkt_size))
+            {
+                LOG_ERROR("[%s] Image receive budget exhausted, closing listener", NETWORKSERVER);
+                goto listen_done;
+            }
+            receive_buffer.reset(new(std::nothrow) unsigned char[header.pkt_size]);
+            if(!receive_buffer) goto listen_done;
+            data = receive_buffer.get();
+            const auto deadline = std::chrono::steady_clock::now() + 10s;
 
             do
             {
                 int tmp_bytes_read = 0;
 
-                tmp_bytes_read = recv_select(client_sock, (char*)&data[(unsigned int)bytes_read], header.pkt_size - bytes_read, 0);
+                int timeout_ms = 0;
+                if(image_packet)
+                {
+                    const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - std::chrono::steady_clock::now()).count();
+                    if(remaining <= 0) goto listen_done;
+                    timeout_ms = static_cast<int>(remaining);
+                }
+                tmp_bytes_read = recv_select(client_sock, (char*)&data[(unsigned int)bytes_read], header.pkt_size - bytes_read, 0, timeout_ms);
 
                 if(tmp_bytes_read <= 0)
                 {
@@ -1305,6 +1351,16 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
         \*-------------------------------------------------*/
             case NET_PACKET_ID_REQUEST_CONTROLLER_COUNT:
                 SendReply_ControllerCount(client_info);
+                break;
+
+            case NET_PACKET_ID_REQUEST_IMAGE_OUTPUTS:
+                status = ProcessRequest_ImageOutputs(client_info, header.pkt_size, header.pkt_dev_id);
+                break;
+
+            case NET_PACKET_ID_RGBCONTROLLER_UPDATE_IMAGE:
+                // Image sinks accept immutable latest frames without hardware I/O.
+                // Do not append megabyte frames to the legacy controller queue.
+                status = ProcessRequest_ImageFrame(client_info, header.pkt_size, data, header.pkt_dev_id);
                 break;
 
             case NET_PACKET_ID_REQUEST_CONTROLLER_DATA:
@@ -1412,7 +1468,7 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
                     profilemanager_thread->queue_mutex.lock();
 
                     NetworkServerControllerThreadQueueEntry new_entry;
-                    new_entry.data                      = data;
+                    new_entry.data                      = receive_buffer.release();
                     new_entry.header                    = header;
                     new_entry.client_info               = client_info;
 
@@ -1524,7 +1580,7 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
                         controller_threads[controller_thread_idx]->queue_mutex.lock();
 
                         NetworkServerControllerThreadQueueEntry new_entry;
-                        new_entry.data                      = data;
+                        new_entry.data                      = receive_buffer.release();
                         new_entry.header                    = header;
                         new_entry.client_info               = client_info;
 
@@ -1582,7 +1638,7 @@ void NetworkServer::ListenThreadFunction(NetworkClientInfo* client_info)
 
         if(delete_data)
         {
-            delete[] data;
+            receive_buffer.reset();
 
             SendAck(client_info, header.pkt_dev_id, header.pkt_id, status);
         }
@@ -1615,6 +1671,83 @@ listen_done:
 /*---------------------------------------------------------*\
 | Server Protocol functions                                 |
 \*---------------------------------------------------------*/
+NetPacketStatus NetworkServer::ProcessRequest_ImageOutputs(NetworkClientInfo* client_info, unsigned int data_size, unsigned int controller_id)
+{
+    if(client_info->client_protocol_version < 7) return NET_PACKET_STATUS_ERROR_UNSUPPORTED;
+    if(data_size != 0) return NET_PACKET_STATUS_ERROR_INVALID_DATA;
+    std::vector<room_image::Output> outputs;
+    {
+        // Keep the pointer alive across a concurrent rescan; do not call
+        // index_from_id while already holding its non-recursive shared mutex.
+        std::shared_lock<std::shared_mutex> lock(controller_ids_mutex);
+        RGBController* controller = nullptr;
+        for(const auto& entry : controller_ids)
+            if(entry.id == controller_id) { controller = entry.controller; break; }
+        if(!controller) return NET_PACKET_STATUS_ERROR_INVALID_ID;
+        if(auto* images = dynamic_cast<room_image::RGBControllerImageInterface*>(controller))
+        {
+            const auto zone_count = controller->GetZoneCount();
+            for(unsigned zone = 0; zone < zone_count; ++zone)
+            {
+                room_image::Output output;
+                if(images->GetImageOutput(zone, output))
+                {
+                    if(outputs.size() >= room_image::wire::MaxOutputs) return NET_PACKET_STATUS_ERROR_INVALID_DATA;
+                    output.zone = zone;
+                    outputs.push_back(output);
+                }
+            }
+        }
+    }
+    const auto payload = room_image::wire::EncodeOutputs(outputs);
+    NetPacketHeader header;
+    InitNetPacketHeader(&header, controller_id, NET_PACKET_ID_REQUEST_IMAGE_OUTPUTS, unsigned(payload.size()));
+    std::lock_guard<std::mutex> send_lock(send_in_progress);
+    auto send_all = [client_info](const void* data, size_t length) {
+        const auto* p = static_cast<const char*>(data);
+        while(length)
+        {
+            const auto sent = send(client_info->client_sock,p,int(length),MSG_NOSIGNAL);
+            if(sent <= 0) return false;
+            p += sent; length -= sent;
+        }
+        return true;
+    };
+    if(!send_all(&header,sizeof(header)) || !send_all(payload.data(),payload.size()))
+    {
+        shutdown(client_info->client_sock,2);
+        return NET_PACKET_STATUS_ERROR_GENERIC;
+    }
+    return NET_PACKET_STATUS_OK;
+}
+
+NetPacketStatus NetworkServer::ProcessRequest_ImageFrame(NetworkClientInfo* client_info, unsigned int data_size,
+                                                        unsigned char* data_ptr, unsigned int controller_id)
+{
+    if(client_info->client_protocol_version < 7) return NET_PACKET_STATUS_ERROR_UNSUPPORTED;
+    unsigned zone = 0, lease_ms = 0;
+    room_image::Mapping mapping;
+    std::shared_ptr<const room_image::Frame> frame;
+    if(!room_image::wire::DecodeFrame(data_ptr,data_size,zone,frame,mapping,lease_ms))
+        return NET_PACKET_STATUS_ERROR_INVALID_DATA;
+    std::shared_lock<std::shared_mutex> lock(controller_ids_mutex);
+    RGBController* controller = nullptr;
+    for(const auto& entry : controller_ids)
+        if(entry.id == controller_id) { controller = entry.controller; break; }
+    if(!controller) return NET_PACKET_STATUS_ERROR_INVALID_ID;
+    auto* images = dynamic_cast<room_image::RGBControllerImageInterface*>(controller);
+    if(!images) return NET_PACKET_STATUS_ERROR_UNSUPPORTED;
+    room_image::Output output;
+    if(!images->GetImageOutput(zone,output)) return NET_PACKET_STATUS_ERROR_UNSUPPORTED;
+    switch(images->SubmitImage(zone,std::move(frame),mapping,lease_ms))
+    {
+        case room_image::SubmitResult::Accepted: return NET_PACKET_STATUS_OK;
+        case room_image::SubmitResult::Busy: return NET_PACKET_STATUS_ERROR_BUSY;
+        case room_image::SubmitResult::Unsupported: return NET_PACKET_STATUS_ERROR_UNSUPPORTED;
+        default: return NET_PACKET_STATUS_ERROR_INVALID_DATA;
+    }
+}
+
 NetPacketStatus NetworkServer::ProcessRequest_ClientFlags(NetworkClientInfo* client_info, unsigned int data_size, unsigned char* data_ptr)
 {
     /*-----------------------------------------------------*\
@@ -3726,6 +3859,8 @@ void NetworkServer::SendReply_ServerFlags(NetworkClientInfo* client_info)
     if(client_info->client_protocol_version >= 6)
     {
         unsigned int    flags_value = server_flags;
+        if(client_info->client_protocol_version >= 7)
+            flags_value |= NET_SERVER_FLAG_SUPPORTS_IMAGE_SURFACES;
         NetPacketHeader reply_hdr;
 
         /*-------------------------------------------------*\
@@ -4481,15 +4616,15 @@ unsigned int NetworkServer::index_from_id(unsigned int id, unsigned int protocol
     return(index);
 }
 
-int NetworkServer::recv_select(SOCKET s, char *buf, int len, int flags)
+int NetworkServer::recv_select(SOCKET s, char *buf, int len, int flags, int timeout_ms)
 {
     fd_set              set;
     struct timeval      timeout;
 
     while(1)
     {
-        timeout.tv_sec          = TCP_TIMEOUT_SECONDS;
-        timeout.tv_usec         = 0;
+        timeout.tv_sec          = timeout_ms > 0 ? timeout_ms / 1000 : TCP_TIMEOUT_SECONDS;
+        timeout.tv_usec         = timeout_ms > 0 ? (timeout_ms % 1000) * 1000 : 0;
 
         FD_ZERO(&set);
         FD_SET(s, &set);
@@ -4502,6 +4637,7 @@ int NetworkServer::recv_select(SOCKET s, char *buf, int len, int flags)
         }
         else if(rv == 0)
         {
+            if(timeout_ms > 0) return 0;
             continue;
         }
         else

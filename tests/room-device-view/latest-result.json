@@ -1,0 +1,11 @@
+{
+    "capture_or_hardware_io": false,
+    "click_ms": 8.0916,
+    "initialization_and_first_paint_ms": 67.0359,
+    "leds": 480000,
+    "paint_max_ms": 24.8119,
+    "paint_median_ms": 23.8439,
+    "selected_at_one_pixel": 1,
+    "widget_height": 600,
+    "widget_width": 800
+}

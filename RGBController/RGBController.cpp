@@ -1584,6 +1584,12 @@ RGBColor RGBController::GetColor(unsigned int led)
     return(color);
 }
 
+void RGBController::CopyColorsSnapshot(std::vector<RGBColor>& destination)
+{
+    std::shared_lock<std::shared_mutex> lock(AccessMutex);
+    destination.assign(colors.begin(), colors.end());
+}
+
 RGBColor* RGBController::GetColorsPointer()
 {
     return(&colors[0]);

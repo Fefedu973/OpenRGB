@@ -10,6 +10,7 @@
 \*---------------------------------------------------------*/
 
 #include "RGBController_AlienwareMonitor.h"
+#include "LogManager.h"
 
 /**------------------------------------------------------------------*\
     @name Alienware Monitor
@@ -53,61 +54,35 @@ RGBController_AlienwareMonitor::~RGBController_AlienwareMonitor()
 
 void RGBController_AlienwareMonitor::SetupZones()
 {
-    zone Logo;
-    Logo.name               = "Logo";
-    Logo.type               = ZONE_TYPE_SINGLE;
-    Logo.leds_min           = 1;
-    Logo.leds_max           = 1;
-    Logo.leds_count         = 1;
-    zones.push_back(Logo);
-
-    led Logo_LED;
-    Logo_LED.name           = "Logo";
-    Logo_LED.value          = 0x01;
-    leds.push_back(Logo_LED);
-
-    zone Number;
-    Number.name             = "Number";
-    Number.type             = ZONE_TYPE_SINGLE;
-    Number.leds_min         = 1;
-    Number.leds_max         = 1;
-    Number.leds_count       = 1;
-    zones.push_back(Number);
-
-    led Number_LED;
-    Number_LED.name         = "Number";
-    Number_LED.value        = 0x02;
-    leds.push_back(Number_LED);
-
-    zone PowerButton;
-    PowerButton.name        = "Power Button";
-    PowerButton.type        = ZONE_TYPE_SINGLE;
-    PowerButton.leds_min    = 1;
-    PowerButton.leds_max    = 1;
-    PowerButton.leds_count  = 1;
-    zones.push_back(PowerButton);
-
-    led PowerButton_LED;
-    PowerButton_LED.name    = "Power Button";
-    PowerButton_LED.value   = 0x08;
-    leds.push_back(PowerButton_LED);
-
+    for(const AlienwareMonitor::Zone& entry : controller->GetProfile().zones)
+    {
+        zone new_zone;
+        new_zone.name       = entry.name;
+        new_zone.type       = ZONE_TYPE_SINGLE;
+        new_zone.leds_min   = 1;
+        new_zone.leds_max   = 1;
+        new_zone.leds_count = 1;
+        zones.push_back(new_zone);
+        led new_led;
+        new_led.name       = entry.name;
+        new_led.value      = entry.mask;
+        leds.push_back(new_led);
+    }
     SetupColors();
 }
 
 void RGBController_AlienwareMonitor::DeviceUpdateLEDs()
 {
-    /*-----------------------------------------------------*\
-    | If all three colors are the same value, speed up the  |
-    | direct mode by using the ALL target (0x0B) instead of |
-    | setting each LED individually.                        |
-    \*-----------------------------------------------------*/
-    if((colors[0] == colors[1]) && (colors[1] == colors[2]))
+    if(leds.empty()) return;
+    bool equal = true;
+    for(unsigned int i = 1; i < leds.size(); ++i) equal &= colors[i] == colors[0];
+    if(equal)
     {
         unsigned char red = RGBGetRValue(colors[0]);
         unsigned char grn = RGBGetGValue(colors[0]);
         unsigned char blu = RGBGetBValue(colors[0]);
-        controller->SendColor(0x0B, red, grn, blu);
+        if(!controller->SendColor(controller->GetProfile().AllZones(), red, grn, blu))
+            LOG_DEBUG("[%s] Color transfer skipped or failed", name.c_str());
     }
     else
     {
@@ -118,17 +93,19 @@ void RGBController_AlienwareMonitor::DeviceUpdateLEDs()
     }
 }
 
-void RGBController_AlienwareMonitor::DeviceUpdateZoneLEDs(int /*zone*/)
+void RGBController_AlienwareMonitor::DeviceUpdateZoneLEDs(int zone)
 {
-    DeviceUpdateLEDs();
+    DeviceUpdateSingleLED(zone);
 }
 
 void RGBController_AlienwareMonitor::DeviceUpdateSingleLED(int led)
 {
+    if(led < 0 || static_cast<size_t>(led) >= leds.size()) return;
     unsigned char red = RGBGetRValue(colors[led]);
     unsigned char grn = RGBGetGValue(colors[led]);
     unsigned char blu = RGBGetBValue(colors[led]);
-    controller->SendColor(leds[led].value, red, grn, blu);
+    if(!controller->SendColor(leds[led].value, red, grn, blu))
+        LOG_DEBUG("[%s] Color transfer skipped or failed", name.c_str());
 }
 
 void RGBController_AlienwareMonitor::DeviceUpdateMode()

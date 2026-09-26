@@ -14,6 +14,7 @@
 #include "base64.hpp"
 #include "GoveeController.h"
 #include "JsonUtils.h"
+#include "GoveeDiscovery.h"
 
 using json = nlohmann::json;
 using namespace std::chrono_literals;
@@ -30,19 +31,18 @@ base64::byte CalculateXorChecksum(std::vector<base64::byte> packet)
     return(checksum);
 }
 
-GoveeController::GoveeController(std::string ip)
+GoveeController::GoveeController(std::string ip, std::string mac)
 {
     /*-----------------------------------------------------*\
     | Fill in location string with device's IP address      |
     \*-----------------------------------------------------*/
     ip_address  = ip;
+    module_mac  = GoveeDiscovery::NormalizeMac(mac);
 
     /*-----------------------------------------------------*\
     | Register callback for receiving broadcasts            |
     \*-----------------------------------------------------*/
     RegisterReceiveBroadcastCallback(this);
-
-    broadcast_received = false;
 
     /*-----------------------------------------------------*\
     | Request device information                            |
@@ -84,6 +84,16 @@ std::string GoveeController::GetSku()
     return(sku);
 }
 
+std::string GoveeController::GetSerial()
+{
+    return module_mac;
+}
+
+bool GoveeController::IsDiscovered()
+{
+    return broadcast_received.load();
+}
+
 std::string GoveeController::GetVersion()
 {
     return("BLE Hardware Version: "  + bleVersionHard  + "\r\n" +
@@ -94,75 +104,25 @@ std::string GoveeController::GetVersion()
 
 void GoveeController::ReceiveBroadcast(char* recv_buf, int size)
 {
-    if(broadcast_received)
-    {
-        return;
-    }
-
-    /*-----------------------------------------------------*\
-    | Responses are not null-terminated, so add termination |
-    \*-----------------------------------------------------*/
-    recv_buf[size] = '\0';
-
-    /*-----------------------------------------------------*\
-    | Convert null-terminated response to JSON              |
-    \*-----------------------------------------------------*/
-    json response;
-    JsonUtils::JsonParse(recv_buf, response);
-
-    /*-----------------------------------------------------*\
-    | Check if the response contains the method name        |
-    \*-----------------------------------------------------*/
-    if(response.contains("msg"))
-    {
-        /*-------------------------------------------------*\
-        | Handle responses for scan command                 |
-        | This command's response should contain a msg      |
-        | object containing a data member with ip, device,  |
-        | sku, among others.                                |
-        \*-------------------------------------------------*/
-        if(response["msg"].contains("cmd"))
-        {
-            if(response["msg"]["cmd"] == "scan")
-            {
-                if(response["msg"].contains("data"))
-                {
-                    if(response["msg"]["data"].contains("ip"))
-                    {
-                        if(response["msg"]["data"]["ip"] == ip_address)
-                        {
-                            if(response["msg"]["data"].contains("sku"))
-                            {
-                                sku = response["msg"]["data"]["sku"];
-                            }
-
-                            if(response["msg"]["data"].contains("bleVersionHard"))
-                            {
-                                bleVersionHard = response["msg"]["data"]["bleVersionHard"];
-                            }
-
-                            if(response["msg"]["data"].contains("bleVersionSoft"))
-                            {
-                                bleVersionSoft = response["msg"]["data"]["bleVersionSoft"];
-                            }
-
-                            if(response["msg"]["data"].contains("wifiVersionHard"))
-                            {
-                                wifiVersionHard = response["msg"]["data"]["wifiVersionHard"];
-                            }
-
-                            if(response["msg"]["data"].contains("wifiVersionSoft"))
-                            {
-                                wifiVersionSoft = response["msg"]["data"]["wifiVersionSoft"];
-                            }
-
-                            broadcast_received = true;
-                        }
-                    }
-                }
-            }
-        }
-    }
+    if(broadcast_received.load() || size <= 0) return;
+    const json response = json::parse(recv_buf, recv_buf + size, nullptr, false);
+    if(response.is_discarded() || !response.is_object() || !response.contains("msg") || !response["msg"].is_object()) return;
+    const auto& msg = response["msg"];
+    if(!msg.contains("cmd") || msg["cmd"] != "scan" || !msg.contains("data")) return;
+    const auto& data = msg["data"];
+    if(!GoveeDiscovery::Matches(data, ip_address, module_mac)) return;
+    auto field = [&data](const char* name) -> std::string {
+        return data.contains(name) && data[name].is_string() ? data[name].get<std::string>() : "";
+    };
+    ip_address      = field("ip");
+    sku             = field("sku");
+    module_mac      = GoveeDiscovery::NormalizeMac(field("device"));
+    bleVersionHard  = field("bleVersionHard");
+    bleVersionSoft  = field("bleVersionSoft");
+    wifiVersionHard = field("wifiVersionHard");
+    wifiVersionSoft = field("wifiVersionSoft");
+    // Release/acquire publication makes all metadata visible to the detector.
+    broadcast_received.store(true);
 }
 
 void GoveeController::SetColor(unsigned char red, unsigned char green, unsigned char blue)
@@ -321,6 +281,7 @@ void GoveeController::SendScan()
 \*---------------------------------------------------------*/
 net_port                        GoveeController::broadcast_port;
 std::vector<GoveeController*>   GoveeController::callbacks;
+std::mutex                     GoveeController::callbacks_mutex;
 std::thread*                    GoveeController::ReceiveThread;
 std::atomic<bool>               GoveeController::ReceiveThreadRun;
 
@@ -353,6 +314,7 @@ void GoveeController::ReceiveBroadcastThreadFunction()
         \*-------------------------------------------------*/
         if(size > 0)
         {
+            std::lock_guard<std::mutex> lock(callbacks_mutex);
             for(std::size_t callback_idx = 0; callback_idx < callbacks.size(); callback_idx++)
             {
                 GoveeController* controller = callbacks[callback_idx];
@@ -365,11 +327,13 @@ void GoveeController::ReceiveBroadcastThreadFunction()
 
 void GoveeController::RegisterReceiveBroadcastCallback(GoveeController* controller_ptr)
 {
+    std::lock_guard<std::mutex> lock(callbacks_mutex);
     callbacks.push_back(controller_ptr);
 }
 
 void GoveeController::UnregisterReceiveBroadcastCallback(GoveeController* controller_ptr)
 {
+    std::lock_guard<std::mutex> lock(callbacks_mutex);
     for(std::size_t callback_idx = 0; callback_idx < callbacks.size(); callback_idx++)
     {
         if(callbacks[callback_idx] == controller_ptr)

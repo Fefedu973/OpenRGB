@@ -34,6 +34,11 @@ Build/
 .idea
 
 # Generic Files
+private/
+__pycache__/
+dist-room/
+*.local.json
+*.key
 .DS_Store
 Thumbs.db
 
@@ -75,6 +80,11 @@ ui_*.h
 *.jsc
 Makefile*
 *build-*
+!FrameSurface/tests/Build-Tests.cmd
+!tests/room-streamdeck/Build-Tests.cmd
+!tests/room-large-device-ui/Build-Tests.cmd
+!tools/room-build/Build-Room.ps1
+!tests/room-plugin-images/Build-Tests.cmd
 *.qm
 *.prl
 

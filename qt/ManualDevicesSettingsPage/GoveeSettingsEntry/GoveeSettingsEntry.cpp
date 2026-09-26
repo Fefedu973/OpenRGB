@@ -11,6 +11,7 @@
 
 #include "GoveeSettingsEntry.h"
 #include "ui_GoveeSettingsEntry.h"
+#include "GoveeDiscovery.h"
 
 GoveeSettingsEntry::GoveeSettingsEntry(QWidget *parent) :
     BaseManualDeviceEntry(parent),
@@ -38,19 +39,26 @@ void GoveeSettingsEntry::loadFromSettings(const json& data)
     {
         ui->IPEdit->setText(QString::fromStdString(data["ip"]));
     }
+    if(data.contains("mac") && data["mac"].is_string())
+    {
+        ui->MacEdit->setText(QString::fromStdString(data["mac"]));
+    }
 }
 
 json GoveeSettingsEntry::saveSettings()
 {
     json result;
     result["ip"] = ui->IPEdit->text().toStdString();
+    if(!ui->MacEdit->text().trimmed().isEmpty())
+        result["mac"] = GoveeDiscovery::NormalizeMac(ui->MacEdit->text().trimmed().toStdString());
     return result;
 }
 
 bool GoveeSettingsEntry::isDataValid()
 {
-    // stub
-    return true;
+    return GoveeDiscovery::ValidIPv4(ui->IPEdit->text().toStdString()) &&
+        (ui->MacEdit->text().trimmed().isEmpty() ||
+         !GoveeDiscovery::NormalizeMac(ui->MacEdit->text().trimmed().toStdString()).empty());
 }
 
 static BaseManualDeviceEntry* SpawnGoveeSettingsEntry(const json& data)

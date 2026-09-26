@@ -267,6 +267,8 @@ private:
     NetPacketStatus                     ProcessRequest_ClientProtocolVersion(NetworkClientInfo* client_info, unsigned int data_size, unsigned char* data_ptr);
     NetPacketStatus                     ProcessRequest_ClientString(NetworkClientInfo* client_info, unsigned int data_size, unsigned char* data_ptr);
     NetPacketStatus                     ProcessRequest_RescanDevices();
+    NetPacketStatus                     ProcessRequest_ImageOutputs(NetworkClientInfo* client_info, unsigned int data_size, unsigned int controller_id);
+    NetPacketStatus                     ProcessRequest_ImageFrame(NetworkClientInfo* client_info, unsigned int data_size, unsigned char* data_ptr, unsigned int controller_id);
 
     NetPacketStatus                     ProcessRequest_GetHIDDeviceInfo(NetworkClientInfo* client_info);
     NetPacketStatus                     ProcessRequest_GetI2CBusInfo(NetworkClientInfo* client_info);
@@ -337,5 +339,5 @@ private:
     \*-----------------------------------------------------*/
     int                                 accept_select(int sockfd);
     unsigned int                        index_from_id(unsigned int id, unsigned int protocol_version, bool* index_valid);
-    int                                 recv_select(SOCKET s, char *buf, int len, int flags);
+    int                                 recv_select(SOCKET s, char *buf, int len, int flags, int timeout_ms = 0);
 };

@@ -17,11 +17,18 @@
 #include "ProfileManager.h"
 #include "ResourceManager.h"
 #include "SettingsManager.h"
+#include "FrameRouting/OpenRGBImagePluginAPI.h"
+#include <memory>
 
-class OpenRGBPluginAPI : public OpenRGBPluginAPIInterface
+struct OpenRGBVirtualControllerState;
+
+class OpenRGBPluginAPI : public OpenRGBPluginAPIInterface, public room_image::PluginAPI
 {
 public:
     OpenRGBPluginAPI();
+    ~OpenRGBPluginAPI() override;
+    unsigned                                ImageAPIVersion() const override { return 1; }
+    bool                                    AttachImageInterface(RGBControllerInterface* controller, room_image::RGBControllerImageInterface* sink) override;
 
     /*-----------------------------------------------------*\
     | LogManager APIs                                       |
@@ -89,10 +96,11 @@ public:
     /*-----------------------------------------------------*\
     | RGBControllers registered by plugin                   |
     \*-----------------------------------------------------*/
-    std::vector<RGBController*>             created_controllers;
-    std::vector<RGBController*>             rgb_controllers;
+    // Snapshot only: the PluginManager must not iterate a mutable shared vector.
+    std::vector<RGBController*>             GetRegisteredVirtualControllers() const;
 
 private:
+    std::shared_ptr<OpenRGBVirtualControllerState> virtual_controller_state;
     LogManager *                            log_manager;
     PluginManagerInterface *                plugin_manager;
     ProfileManager *                        profile_manager;

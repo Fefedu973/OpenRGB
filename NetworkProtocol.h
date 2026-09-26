@@ -25,7 +25,9 @@
 |               (Release Candidate 1.0rc2)                              |
 |   6:      Server name, Features TBD (Release 1.0)                     |
 \*---------------------------------------------------------------------*/
-#define OPENRGB_SDK_PROTOCOL_VERSION    6
+// Fork extension: negotiate version 7 AND the image feature flag/schema.
+// This is not an upstream allocation of version 7 or of the vendor packet IDs.
+#define OPENRGB_SDK_PROTOCOL_VERSION    7
 
 /*-----------------------------------------------------*\
 | Default Interface to bind to.                         |
@@ -67,6 +69,7 @@ enum
     NET_PACKET_STATUS_ERROR_NOT_ALLOWED         = 3,    /* Not allowed error                                    */
     NET_PACKET_STATUS_ERROR_INVALID_ID          = 4,    /* Invalid device ID or index error                     */
     NET_PACKET_STATUS_ERROR_INVALID_DATA        = 5,    /* Invalid data error                                   */
+    NET_PACKET_STATUS_ERROR_BUSY                = 6,    /* Room image sink temporarily busy                     */
 };
 
 typedef struct
@@ -95,6 +98,7 @@ enum
     NET_SERVER_FLAG_SUPPORTS_SETTINGSMANAGER    = ( 1 << 4 ),   /* Server supports SettingsManager API          */
     NET_SERVER_FLAG_SUPPORTS_DETECTION          = ( 1 << 5 ),   /* Server supports detection functions          */
     NET_SERVER_FLAG_SUPPORTS_DEVICE_INFO        = ( 1 << 6 ),   /* Server supports device info functions        */
+    NET_SERVER_FLAG_SUPPORTS_IMAGE_SURFACES     = ( 1 << 29 ),  /* Room SDK7 RIMG schema1 image outputs          */
 
     NET_SERVER_FLAG_LOCAL_CLIENT                = ( 1 << 16),   /* Confirm that client is local client          */
 };
@@ -106,6 +110,8 @@ enum
     \*----------------------------------------------------------------------------------------------------------*/
     NET_PACKET_ID_REQUEST_CONTROLLER_COUNT      = 0,    /* Request RGBController device count from server       */
     NET_PACKET_ID_REQUEST_CONTROLLER_DATA       = 1,    /* Request RGBController data block                     */
+    NET_PACKET_ID_REQUEST_IMAGE_OUTPUTS          = 0x524D0001, /* Room SDK7, device image descriptors           */
+    NET_PACKET_ID_RGBCONTROLLER_UPDATE_IMAGE     = 0x524D0002, /* Room SDK7, latest BGRA frame + mapping         */
 
     NET_PACKET_ID_ACK                           = 10,   /* Acknowledge an SDK packet                            */
 

@@ -138,6 +138,7 @@ public:
 
     void                                Initialize(bool tryConnect, bool detectDevices, bool startServer, bool applyPostOptions, bool startGui);
     void                                InitializeServer();
+    void                                SetVirtualOnly(bool enabled) { virtual_only = enabled; }
 
     void                                WaitForInitialization();
 
@@ -165,6 +166,7 @@ private:
     | Detection enabled flag                                |
     \*-----------------------------------------------------*/
     bool                                        detection_enabled;
+    bool                                        virtual_only = false;
 
     /*-----------------------------------------------------*\
     | Flag to track the first detection completion          |

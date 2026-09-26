@@ -1,0 +1,9 @@
+QT += core gui widgets testlib
+CONFIG += console c++17 release
+CONFIG -= app_bundle debug
+TEMPLATE = app
+TARGET = test_lazy_led
+INCLUDEPATH += ../../qt
+SOURCES += test_lazy_led.cpp
+HEADERS += ../../qt/LazyLEDListModel.h
+win32:LIBS += -lpsapi

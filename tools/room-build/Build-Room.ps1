@@ -68,6 +68,12 @@ try {
     if ($Package) {
         $dist=Join-Path $repo 'dist-room'
         New-Item -ItemType Directory -Path $dist -Force | Out-Null
+        # This one-shot SDK client is independent of the core build. Compile it
+        # explicitly: neither qmake nor windeployqt discovers this helper.
+        & (Join-Path $repo 'tools\room-streamdeck\Build-ProfileSelect.ps1')
+        $profileHelperBuild=Join-Path $repo 'build\room-streamdeck'
+        Copy-Item -LiteralPath (Join-Path $profileHelperBuild 'ProfileSelect.exe') -Destination $dist
+        Copy-Item -LiteralPath (Join-Path $profileHelperBuild 'ProfileSelect-BUILD-INFO.json') -Destination $dist
         Copy-Item -LiteralPath (Join-Path $repo 'build\release\OpenRGB.exe') -Destination $dist
         # Non-Qt runtime dependencies are supplied by the OpenRGB build itself.
         Get-ChildItem -LiteralPath (Join-Path $repo 'build\release') -File | Where-Object {
@@ -116,6 +122,8 @@ try {
         }
         $manifest=@{coreCommit=(& git -C $repo rev-parse HEAD);sdkImageSchema=1; sdkVersion=7;packagedAtUtc=[DateTime]::UtcNow.ToString('o');existingBuild=[bool]$PackageExisting}
         $manifest.coreWorkingTreeDirty=[bool](& git -C $repo status --porcelain --untracked-files=normal)
+        $manifest.profileSelectBinarySha256=Get-BinaryHash (Join-Path $dist 'ProfileSelect.exe')
+        $manifest.profileSelectSourceSha256=Get-BinaryHash (Join-Path $repo 'tools\room-streamdeck\ProfileSelect.cpp')
         $manifest.nativeStreamDeckIncluded=$withNativeStreamDeck
         if ($withNativeStreamDeck) {
             $manifest.nativeStreamDeckBinarySha256=Get-BinaryHash (Join-Path $dist 'RoomStreamDeckNative.dll')

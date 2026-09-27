@@ -57,11 +57,20 @@ configurées à zéro dans `Configuration.json`. La vérification des zones rest
 activée : une nouvelle sortie réellement non configurée sera toujours signalée.
 Ne pas ajouter de LED fictives à une sortie vide pour masquer cette fenêtre.
 
-Au démarrage, le profil **Full Scale - Rainbow** anime le canvas entier à
+Avec **Remember Last Session** activé, OpenRGB reprend le dernier effet et la
+dernière carte, y compris les réglages d'effet non enregistrés dans un profil.
+Sans session valide, le profil **Full Scale - Rainbow** anime le canvas entier à
 800 × 500 et 30 images/s. Les pilotes adaptent ensuite la cadence aux appareils,
 notamment l'AW3426DW limité à dix mises à jour/s pour éviter l'accumulation de
 commandes. Le profil de démarrage contient uniquement les réglages d'effets ;
 il ne remplace pas les tailles de zones et segments enregistrées.
+
+Les profils **Full Blanc**, **Full Noir**, **Music - Tri Band** et
+**Ambilight - Web Page** sont également installés. Music sélectionne sa carte
+spécialisée ; les autres reprennent Full Scale. Ambilight rend
+`https://localhost:8443`, avec les écrans placés dans l'application de capture.
+Les déplacements dans Visual Map sont automatiquement enregistrés dans le
+fichier de la carte. Voir `scenes-and-persistence.md` pour les détails.
 
 `tools/room-setup/Install-NativeStartup.ps1` installe une tâche **OpenRGB Room**
 qui lance directement `OpenRGB.exe` quinze secondes après ouverture de session.

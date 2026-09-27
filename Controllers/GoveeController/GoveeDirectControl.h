@@ -33,12 +33,16 @@ public:
             ++attempts;
             next_power = now + std::chrono::seconds(1);
         }
-        result.enable = !sent || result.power_on || now - last_enable >= std::chrono::seconds(10);
+        // B1 enters external-control mode and may interrupt an active stream.
+        // Ordinary B0 frames (including idle keepalives) already maintain it.
+        // Only reacquire after a real gap in frame output, never on a timer
+        // measured from the last B1. Resuming does not restart the ON window.
+        const bool resumed = sent && now - last_frame >= std::chrono::seconds(30);
+        result.enable = !sent || result.power_on || resumed;
         brightness = std::min(brightness, 100u);
-        result.brightness = !sent || result.power_on || brightness != last_brightness ||
-                            now - last_brightness_time >= std::chrono::seconds(10);
-        if(result.enable) last_enable = now;
-        if(result.brightness) { last_brightness = brightness; last_brightness_time = now; }
+        result.brightness = !sent || result.power_on || resumed || brightness != last_brightness;
+        if(result.brightness) last_brightness = brightness;
+        last_frame = now;
         sent = true;
         return result;
     }
@@ -46,5 +50,5 @@ public:
 private:
     bool active = false, sent = false;
     unsigned int attempts = 0, last_brightness = 0;
-    Clock::time_point started{}, next_power{}, last_enable{}, last_brightness_time{};
+    Clock::time_point started{}, next_power{}, last_frame{};
 };

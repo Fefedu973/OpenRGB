@@ -4,6 +4,10 @@ Deux défauts distincts ont été corrigés : la recherche Bluetooth après un d
 Windows à froid et l'omission d'une seconde bande LAN H61A2 lors de l'import du
 layout. Ce document ne contient ni adresse privée, ni clé d'authentification.
 
+Le maintien LAN initial a ensuite été corrigé pour éviter de réactiver le mode
+Direct toutes les dix secondes pendant une animation : voir le
+[diagnostic des clignotements Wi-Fi](govee-wifi-blink-2026-09-27.md).
+
 ## Bluetooth : alimenter le cache Windows avant la connexion
 
 Après le redémarrage signalé, les quatre appareils configurés échouaient avant

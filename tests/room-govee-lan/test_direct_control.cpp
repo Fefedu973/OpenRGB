@@ -51,28 +51,38 @@ int main()
         RGBController_Govee c;
         Time(0); c.DeviceUpdateMode();
         Check(c.radio.calls == std::vector<std::string>{"enable", "frame", "brightness", "on"}, "acquisition programs frame and brightness before ON");
-        // A continuous 50 FPS effect must not postpone retries or keepalives.
-        for(unsigned t=20; t<=31000; t+=20) { Time(t); c.DeviceUpdateLEDs(); }
+        // Continuous output must not re-enter external-control mode or resend
+        // unchanged brightness: both commands may disturb the active rendering.
+        for(unsigned t=20; t<=120000; t+=20) { Time(t); c.DeviceUpdateLEDs(); }
         Check(c.radio.Count("on") == 3, "ON retries bounded to three during acquisition");
-        Check(c.radio.Count("enable") == 5, "B1 retries then ten-second refresh despite continuous frames");
-        Check(c.radio.Count("brightness") == 5, "unchanged brightness is not sent every frame");
-        Time(32000); c.DeviceUpdateLEDs();
-        Check(c.radio.Count("enable") == 6, "B1 refresh deadline is independent of last RGB update");
+        Check(c.radio.Count("enable") == 3, "120 seconds at 50 FPS never re-enters mode after acquisition");
+        Check(c.radio.Count("brightness") == 3, "120 seconds at 50 FPS never resends unchanged brightness");
+        Check(c.radio.Count("frame") == 6001, "all RGB frames are still transmitted");
+        Time(120020); c.modes[1].brightness=50; c.DeviceUpdateLEDs();
+        Check(c.radio.Count("brightness") == 4, "brightness change sent immediately");
+        Check(c.radio.Count("enable") == 3, "brightness change does not re-enter mode");
+        Time(120040); c.DeviceUpdateLEDs();
+        Check(c.radio.Count("brightness") == 4, "new unchanged brightness coalesced");
+
+        Time(151040); c.DeviceUpdateLEDs();
+        Check(c.radio.Count("enable") == 4 && c.radio.Count("brightness") == 5, "real 31-second output gap reacquires mode and brightness once");
         Check(c.radio.Count("on") == 3, "refresh does not rearm acquisition after manual OFF");
-        Time(32020); c.modes[1].brightness=50; c.DeviceUpdateLEDs();
-        Check(c.radio.Count("brightness") == 7, "brightness change sent immediately");
-        Time(32040); c.DeviceUpdateLEDs();
-        Check(c.radio.Count("brightness") == 7, "new unchanged brightness coalesced");
-        Time(60000); c.DeviceUpdateLEDs();
-        Check(c.radio.Count("on") == 3, "long idle reconnect refresh never forces ON");
-        Time(60020); c.DeviceUpdateMode();
+        for(unsigned t=151060; t<=191040; t+=20) { Time(t); c.DeviceUpdateLEDs(); }
+        Check(c.radio.Count("enable") == 4 && c.radio.Count("brightness") == 5, "recovered continuous stream is not periodically reactivated");
+        Time(191060); c.DeviceUpdateMode();
         Check(c.radio.Count("on") == 4, "explicit Direct selection starts a new acquisition");
 
         RGBController_Govee idle;
         Time(0); idle.DeviceUpdateLEDs(); // An LED update may arrive before mode callback.
-        Time(1000); idle.DeviceUpdateLEDs(); Time(2000); idle.DeviceUpdateLEDs();
-        Time(3000); idle.DeviceUpdateLEDs();
+        for(unsigned t=1000; t<=120000; t+=1000) { Time(t); idle.DeviceUpdateLEDs(); }
         Check(idle.radio.Count("on") == 3, "one-second worker keepalive services bounded acquisition");
+        Check(idle.radio.Count("enable") == 3 && idle.radio.Count("brightness") == 3, "120 seconds of 1 FPS keepalive never counts as idle");
+        Check(idle.radio.Count("frame") == 121, "one-second keepalive sends only normal frames after acquisition");
+        Time(149999); idle.DeviceUpdateLEDs();
+        Check(idle.radio.Count("enable") == 3, "gap shorter than thirty seconds does not reactivate");
+        Time(179999); idle.DeviceUpdateLEDs();
+        Check(idle.radio.Count("enable") == 4 && idle.radio.Count("brightness") == 4 && idle.radio.Count("on") == 3,
+              "exact thirty-second gap reacquires without ON");
         RGBController_Govee delayed;
         Time(0); delayed.DeviceUpdateMode(); Time(4000); delayed.DeviceUpdateLEDs();
         Check(delayed.radio.Count("on") == 1, "late scheduling does not extend acquisition window");

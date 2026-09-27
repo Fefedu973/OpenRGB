@@ -44,3 +44,14 @@ bridge. Configure other devices and strip lengths only after enumeration.
 
 The SDK integration test creates its own temporary settings and never uses this
 hardware candidate. Existing SignalRGB layouts and registry are untouched.
+# Native capture profiles
+
+`create-native-effect-profiles.py` prepares native preset profiles and optional
+named BetterScreenCapture scenes in a new output directory. It copies an existing
+profile's controller routes and unrelated plugin state, reads defaults from the
+Effects preset specifications, and stores source/scene selection per profile.
+It performs no SDK calls or live file modifications. `--scene "Name=UUID"`
+creates a Screen Ambience profile following Better's native appearance; raw
+screen effects retain their own processing. Optional music template/map arguments
+reuse existing audio settings and a dedicated Visual Map route. The independent
+profile/routing regressions run with `python tools/room-setup/test_native_capture_profiles.py`.

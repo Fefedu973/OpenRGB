@@ -73,6 +73,33 @@ un PID fautif. La validation synthétique vérifie le message d'un timeout de
 est une modification de source séparée : la DLL 88607FDF validée ci-dessus ne
 le contient pas encore.
 
+### Timeout isolé : récupération sur la session existante
+
+Le 27 septembre, le flux d'images continuait d'arriver dans OpenRGB alors que
+les ACK restaient figés après une erreur RPC. Le verrou par PID avait arrêté les
+tentatives. Une relance d'Elgato a ensuite échoué à son tour, avant le premier
+statut `ready`. La dernière valeur `uptimeMs` conservée est un cache : elle ne
+permet pas de situer exactement l'opération qui a bloqué. La cause de ces délais
+reste à déterminer avec le diagnostic RPC détaillé ; les deux applications
+répondaient encore à Windows.
+
+Le correctif du client distingue maintenant un timeout isolé d'une session
+inutilisable. Il conserve le **même handle** uniquement si la lecture de santé
+supplémentaire, déjà effectuée sur ce handle, répond avec `errors=0`. Il ne rejoue
+pas l'ancienne image et ne prolonge aucun bail : le tour suivant prend l'image
+la plus récente. Au maximum deux récupérations consécutives sont permises sans
+image acquittée par le RPC. Si la santé ne répond pas, si le script annonce une
+erreur, si le transport est détaché, ou si la borne est atteinte, le détachement
+et le verrou par PID restent en vigueur. Les échecs de nettoyage sont également
+journalisés. Aucun deuxième attachement ni changement du délai de 1500 ms.
+
+`Test-ClientRecovery.ps1` compile le vrai `StreamDeckNativeClient.cpp` contre une
+DLL C ABI synthétique : 41 vérifications couvrent les diagnostics ancien/nouveau,
+le succès après timeout, l'absence de rejeu et de deuxième ouverture, les erreurs
+de santé/JSON/script/détachement, la borne des tentatives et un nouveau PID.
+Aucun processus Elgato ni Frida n'est utilisé par ce test. Ce test ne démontre
+pas la récupération de l'incident réel dont les requêtes de santé échouaient.
+
 `lastFrameCoverage` rapporte les nombres `rendered`, `injected`, `empty` et
 `actions` **pour la dernière image**, avec son numéro et son état `restore`.
 L'ACK exige quinze images natives valides et quinze injections ; une restauration

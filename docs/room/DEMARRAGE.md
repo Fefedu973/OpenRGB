@@ -72,6 +72,16 @@ spécialisée ; les autres reprennent Full Scale. Ambilight rend
 Les déplacements dans Visual Map sont automatiquement enregistrés dans le
 fichier de la carte. Voir `scenes-and-persistence.md` pour les détails.
 
+Le bouton **Musique** et son profil historique **Music - Room Pulse** chargent
+désormais le port natif **Pump Up Beats** (`SignalFavorite.PumpUpBeats`), avec les
+vingt contrôles de l'effet. L'ancien nom du profil est conservé pour les
+raccourcis. La carte musicale actuelle et ses 125 membres sont conservés ; le
+modèle plus ancien « Music - Pump Up Beats » ne doit pas la remplacer. Le gain
+natif **Volume Boost** a été calibré à 75 sur cette installation ; le gain FFT
+classique ne commande pas l'enveloppe de ce port. La copie nommée **SignalRGB -
+Pump Up Beats** possède le même routage et les mêmes réglages. Les profils
+précédents sont sauvegardés dans `private/native-configured/migration-backups/`.
+
 Le dossier **Lights** du Stream Deck sélectionne ces cinq profils. **Autres
 effets** propose Plasma, Feu, Aurore, Ondes, Etoiles et Bulles, rendus par des
 shaders natifs. Chaque bouton appelle brièvement `dist-room/ProfileSelect.exe`,

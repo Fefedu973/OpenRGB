@@ -12,9 +12,25 @@
 #endif
 
 namespace streamdeck_background {
+namespace {
+bool IsReplyTimeout(const std::string& error)
+{
+    // ABI1's original diagnostic conflates timeout and detach. A successful
+    // health RPC on this SAME handle below disambiguates a live session.
+    if(error=="Native compositor RPC timed out or detached")return true;
+    return error.find("Native compositor RPC method=")==0
+        && error.find(" detached=false: Reply deadline expired")!=std::string::npos;
+}
+bool HealthyDiagnostics(const nlohmann::json& value)
+{
+    return value.is_object() && value.contains("errors") && value["errors"].is_number_integer()
+        && value["errors"]==0 && value.contains("ready") && value["ready"].is_boolean();
+}
+}
 struct NativeClient::Impl {
     std::string library,lock_directory;unsigned fps;void* handle=nullptr;
     std::uint32_t failed_pid=0,active_pid=0;
+    unsigned consecutive_timeout_recoveries=0;
     nlohmann::json diagnostics;
     std::string close_error;
 #ifdef _WIN32
@@ -52,7 +68,7 @@ struct NativeClient::Impl {
             if(code==ROOM_SD_GUARD || code==ROOM_SD_ATTACH || code==ROOM_SD_RPC)failed_pid=pid;
             throw std::runtime_error(error[0]?error.data():"Native compositor could not open");
         }
-        active_pid=pid;close_error.clear();diagnostics=nullptr;
+        active_pid=pid;close_error.clear();diagnostics=nullptr;consecutive_timeout_recoveries=0;
     }
     std::string Close()
     {
@@ -95,12 +111,26 @@ nlohmann::json NativeClient::Request(const char* path,const std::string& body)
                                  static_cast<uint32_t>(body.size()),result.data(),static_cast<uint32_t>(result.size()),
                                  error.data(),static_cast<uint32_t>(error.size()));
     if(code!=ROOM_SD_OK) {
+        const std::string reason=error[0]?error.data():"Native compositor request failed";
         std::array<char,16384> status{},status_error{};
-        if(impl->request(impl->handle,ROOM_SD_STATUS,nullptr,0,status.data(),static_cast<uint32_t>(status.size()),
-                         status_error.data(),static_cast<uint32_t>(status_error.size()))==ROOM_SD_OK)
+        const bool responded=impl->request(impl->handle,ROOM_SD_STATUS,nullptr,0,status.data(),static_cast<uint32_t>(status.size()),
+                         status_error.data(),static_cast<uint32_t>(status_error.size()))==ROOM_SD_OK;
+        if(responded)
             impl->diagnostics=nlohmann::json::parse(status.data(),nullptr,false);
-        impl->failed_pid=impl->active_pid;impl->Close();
-        throw std::runtime_error(error[0]?error.data():"Native compositor request failed");
+        // An isolated missed RPC reply does not prove a native-hook fault.
+        // Keep ownership only after a fresh, fault-free reply on this handle;
+        // never attach again, replay the old frame or extend the image lease.
+        // The controller's existing bounded retry will select the latest frame.
+        // Two recoveries without a successful frame are the maximum.
+        if(code==ROOM_SD_RPC && IsReplyTimeout(reason) && responded
+            && HealthyDiagnostics(impl->diagnostics) && impl->consecutive_timeout_recoveries<2)
+        {
+            ++impl->consecutive_timeout_recoveries;
+            throw std::runtime_error(reason+"; health recovered on existing session; waiting for a fresh frame");
+        }
+        impl->failed_pid=impl->active_pid;
+        const auto cleanup=impl->Close();
+        throw std::runtime_error(reason+(cleanup.empty()?std::string():"; cleanup: "+cleanup));
     }
     const auto value=nlohmann::json::parse(result.data(),nullptr,false);
     // layout is null until the guarded native composer is discovered.
@@ -111,6 +141,7 @@ nlohmann::json NativeClient::Request(const char* path,const std::string& body)
         if(value.value("errors",0)!=0)
             throw std::runtime_error("Native compositor reported a fault: "+value.value("lastFault",nlohmann::json()).dump());
     }
+    if(operation==ROOM_SD_FRAME && value.contains("accepted") && value["accepted"]==true)impl->consecutive_timeout_recoveries=0;
     return value;
 #else
     (void)path;(void)body;throw std::runtime_error("The optional native Elgato compositor requires Windows");

@@ -1,2 +1,2 @@
 # Preserve the exact bytes of the already validated GPL hook across checkouts.
-background-core.js -text
+background-core.js -text whitespace=cr-at-eol

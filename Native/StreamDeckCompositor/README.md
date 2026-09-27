@@ -24,6 +24,19 @@ Le script global `tools/room-build/Build-Room.ps1` accepte `-NativeStreamDeck -F
 
 `-Tests` compile puis exécute seulement un enfant synthétique créé par le test. Il vérifie SHA256, refus de cible non Elgato, verrou compatible `_locking`, RPC et 20 transferts binaires de 311040 octets, expiration du bail, timeout RPC et restauration/détachement. Il construit également `test_elgato.exe`, **sans le lancer**.
 
+Les réponses RPC sont publiées sous un mutex commun : identifiant attendu,
+payload, erreur et indicateur de disponibilité restent cohérents, même si le
+callback GLib s'exécute hors du thread qui attend. Le détachement est atomique.
+`test_rpc_response.cpp` vérifie 2000 réponses de 16 Ko entre deux threads,
+les identifiants périmés, les doublons, les erreurs et le `null` légitime avant
+découverte du layout. La version précédente marquait une réponse disponible
+avant de copier son JSON ; une interruption à cet endroit pouvait exposer
+`null`. Cet entrelacement a été reproduit avec l'ancien callback extrait, sans
+processus Elgato. Cela corrige une course réelle, sans prétendre que tous les
+avertissements observés en session provenaient de cette seule cause. Les
+réponses de forme inattendue indiquent maintenant l'opération et le type JSON,
+sans enregistrer leur contenu.
+
 ## Configuration
 
 ```json

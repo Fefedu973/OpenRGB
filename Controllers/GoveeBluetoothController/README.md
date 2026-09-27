@@ -7,11 +7,15 @@ process, loopback bridge, cloud service or LAN color fallback is involved.
 The implementation is based on the independently established packet/state
 behavior in the companion below. Native tests on 27 September 2026 validated
 initial connection, RGB acquisition and restoration on three H6008 bulbs and
-one H6159 strip. **H6008 reconnection in the same process remains unreliable:**
-a second authentication can receive no notifications despite a successful CCCD
-subscription. Initial hardware success does not establish reliable recovery
-after a radio interruption. The bounded comparisons are documented in
-[the reconnection probe](tests/RECONNECT-PROBE.md).
+one H6159 strip. An H6008 reconnection defect was then isolated and corrected:
+the device can retain its authenticated session after Windows GATT objects
+close. Repeating E701 in that state is ignored, whereas an identity query with
+the previous session credential succeeds. The native transport now verifies
+that credential before resuming. Three consecutive connections on each of the
+three bulbs passed, including all 27 state queries. A further three cycles
+destroyed/recreated the complete transport on one bulb and passed all nine
+queries, exercising the same-process handoff needed by rescan. Evidence and remaining
+scope limits are documented in [the reconnection probe](tests/RECONNECT-PROBE.md).
 
 ## Build and offline validation
 
@@ -40,7 +44,11 @@ brightness scaling, static RGB/white restoration, orphan-mode recovery and
 failed recovery readback, reconnects, repeated-color suppression, external OFF,
 H6159 owned blackouts and ordered resume, original raw brightness and secondary
 RGB flag restoration, unsupported modes, AES128 known answer with independently
-checked RC4 tail, and 256 synthetic encrypted packet round trips. Native hardware
+checked RC4 tail, and 256 synthetic encrypted packet round trips. Fourteen additional
+authentication tests cover retained-session identity, fresh authentication after
+a simulated reset, lost replies, per-device isolation, wrong-identity refusal,
+cache expiry, bounded eviction and complete transport recreation.
+Native hardware
 observations apply to the tested units; neither these tests nor nominal
 intervals are optical frame-rate measurements.
 
@@ -128,8 +136,24 @@ already connected/authenticated by a caller is
 reused for the initial snapshot and acquisition rather than disconnected and
 authenticated a second time.
 
-H6008 authenticates with E701/E702 (one retry for the first E701 reply), then
-checks the exact AA14 Wi-Fi identity before any mode/color write. It sends the
+H6008 initially authenticates with E701/E702 (one retry for the first E701 reply),
+then checks the exact AA14 Wi-Fi identity before any mode/color write. On later
+GATT connections, a fresh AA14 first tests its previous session credential.
+Only an exact identity match permits reuse. A reply timeout falls back to the
+bounded fresh E701/E702 exchange. A missing E702 or AA14 reply retains the new
+key as an unverified candidate, so the next attempt can validate it without
+blindly restarting an already completed handshake. Lost replies do not erase
+the last verified credential; a different identity clears candidates and aborts.
+Credentials remain only in native memory and are never written to logs or
+configuration. For rescan, an authenticated transport hands its candidates to
+a process-memory cache scoped by exact BLE address, profile, AA14 identity and
+root authentication credential. It contains at most 16 entries, with a five-
+minute monotonic TTL checked on every access. A new transport consumes its
+entry before validation; failed verification cannot leave that unchecked entry
+available to another controller. Entry expiry/eviction/destruction wipes key
+bytes, and a shared lifetime prevents static shutdown from invalidating a
+worker's cache. Local candidates are wiped when their transport is destroyed.
+No external process or bridge performs recovery. It sends the
 established mode05 realtime packets. The first restorable mode0D response is
 preserved exactly, including white-temperature fields. If the device was left
 in mode05 by a crashed/rebooted owner, the explicitly submitted RGB establishes
@@ -167,6 +191,25 @@ not measurements of LED refresh or guarantees for another Windows adapter.
 
 Recoverable failures reconnect after 1 second; after three consecutive failed
 steps the backoff is 30 seconds. A successful step clears that failure count.
+An H6008 AA01 power-state read with a missing reply is retried once on the same
+authenticated connection before that reconnect path. Other H6008 reads remain
+single-attempt, and H6159 retains its existing one-retry read policy. Each reply
+wait is bounded to three seconds; the retry adds at most one such wait and one
+bounded GATT write. Cancellation and the shared shutdown deadline still abort
+without an additional attempt. After authentication, a closed GATT session also
+aborts the receive loop before its next 25ms wait, as a connection error rather
+than a reply timeout. A closed link is therefore not retried by this policy;
+initial E7/AA14 authentication is exempt from this session-closure check. This
+shortens recovery after a confirmed closure; it does not establish or fix the
+cause of the periodic disconnects observed during the full-device live run.
+No mode, color, power command or authentication
+handshake is replayed by the query retry. A recovered read is logged explicitly;
+two missing replies are reported with the attempt count and numeric connection/
+session state before normal reconnection. Per-connection counters distinguish
+missing replies, retries and successful recoveries. Offline tests cover recovery,
+exhaustion/reconnection, no extra color writes and cancellation. This change
+addresses tolerance of lost status replies; its effect on the observed periodic
+AA01 loss has not yet been verified on hardware.
 The original snapshot persists across reconnects. Logs report meaningful state
 changes and bounded errors, without dumping authentication packets.
 Timeout diagnostics identify only the expected command/prefix and counts of

@@ -43,6 +43,10 @@ def main():
     table += '\n' + method(govee, 'void RGBController_Govee::SetupZones()')
     table += '\n' + method(govee, 'void RGBController_Govee::DeviceConfigureZone(int zone_idx)')
     (a.out / 'govee-methods.inc').write_text(table, encoding='utf-8', newline='\n')
+    aura = (repo / 'Controllers/AsusAuraUSBController/AsusAuraUSBController/RGBController_AsusAuraUSB.cpp').read_text(encoding='utf-8')
+    aura = '\n'.join(method(aura, 'void RGBController_AuraUSB::' + fn) for fn in
+                     ('SetupZones()', 'DeviceConfigureZone(int zone_idx)', 'DeviceUpdateZoneLEDs(int zone)', 'DeviceUpdateSingleLED(int led)'))
+    (a.out / 'aura-methods.inc').write_text(aura, encoding='utf-8', newline='\n')
     exe = a.out / ('channel-baseline.exe' if a.without_fix else 'channel-reconfigure.exe')
     subprocess.run(['cl', '/nologo', '/std:c++17', '/EHsc', '/MD', '/utf-8',
                     '/I' + str(a.out), str(Path(__file__).with_name('test_reconfigure.cpp')),

@@ -12,6 +12,7 @@ enum { ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE=2, ZONE_FLAG_MANUALLY_CONFIGURABLE_N
        ZONE_FLAG_MANUALLY_CONFIGURABLE_SEGMENTS=32, ZONE_FLAG_MANUALLY_CONFIGURED_SIZE=4096,
        ZONE_FLAG_MANUALLY_CONFIGURED_NAME=8192, ZONE_FLAG_MANUALLY_CONFIGURED_TYPE=16384,
        ZONE_FLAG_MANUALLY_CONFIGURED_MATRIX_MAP=32768, ZONE_TYPE_LINEAR=1, ZONE_TYPE_MATRIX=2,
+       ZONE_TYPE_SEGMENTED=6, AURA_ADDRESSABLE_MAX_LEDS=120,
        CORSAIR_LIGHTING_NODE_NUM_CHANNELS=2, CORSAIR_LIGHTING_NODE_MODE_DIRECT=0 };
 struct Matrix {
     unsigned width=0,height=0; std::vector<unsigned> map;
@@ -20,9 +21,11 @@ struct Matrix {
         if(values) std::copy_n(values,w*h,map.begin());
     }
 };
+struct Segment { unsigned start_idx, leds_count; };
 struct Zone { unsigned flags=0, leds_count=0, leds_min=0, leds_max=0;
-              int type=0; std::string name; Matrix matrix_map; unsigned* colors=nullptr; };
-struct led { std::string name; };
+              int type=0; std::string name; Matrix matrix_map; unsigned* colors=nullptr;
+              std::vector<Segment> segments; };
+struct led { std::string name; unsigned value=0; };
 struct Mode { int value=0; };
 struct FakeUSB {
     int last_channel=-1; unsigned last_count=0; const unsigned* last_colors=nullptr;
@@ -66,6 +69,22 @@ struct RGBController_Govee: Boundary {
     void DeviceUpdateLEDs() { ++updates; }
 };
 #include "govee-methods.inc"
+enum class AuraDeviceType { FIXED, ADDRESSABLE };
+struct AuraDeviceInfo { unsigned num_leds, num_headers; AuraDeviceType device_type; };
+struct FakeAura: FakeUSB {
+    std::vector<AuraDeviceInfo> devices={{4,1,AuraDeviceType::FIXED},{1,0,AuraDeviceType::ADDRESSABLE}};
+    unsigned GetChannelCount() { return (unsigned)devices.size(); }
+    const std::vector<AuraDeviceInfo>& GetAuraDevices() { return devices; }
+};
+struct RGBController_AuraUSB: Boundary {
+    FakeAura radio;
+    FakeAura* controller=&radio;
+    bool initializedMode=true;
+    void SetupZones(); void DeviceConfigureZone(int zone_idx);
+    void DeviceUpdateZoneLEDs(int zone); void DeviceUpdateSingleLED(int led);
+    void DeviceUpdateMode() {}
+};
+#include "aura-methods.inc"
 static int assertions=0;
 static void check(bool condition, const char* why) {
     ++assertions; if(!condition) { std::cerr << "FAIL: " << why << '\n'; std::exit(1); }
@@ -103,6 +122,32 @@ int main() {
         check(g.updates==0, "invalid Govee zone does not trigger update");
         z.type=6; g.DeviceConfigureZone(0);
         check(g.leds.size()==item.second && g.colors.size()==item.second, "segmented geometry preserves physical frame size");
+    }
+    RGBController_AuraUSB a;
+    a.SetupZones();
+    check(a.zones[0].leds_count==4 && a.zones[0].leds_min==4 && a.zones[0].leds_max==4, "Aura fixed channel retains hardware count");
+    check(!(a.zones[0].flags & ZONE_FLAG_MANUALLY_CONFIGURABLE_SIZE), "Aura fixed channel never advertises resizing");
+    check((a.zones[0].flags & (ZONE_FLAG_MANUALLY_CONFIGURABLE_TYPE|ZONE_FLAG_MANUALLY_CONFIGURABLE_SEGMENTS)) ==
+          (ZONE_FLAG_MANUALLY_CONFIGURABLE_TYPE|ZONE_FLAG_MANUALLY_CONFIGURABLE_SEGMENTS), "Aura fixed channel permits logical segments");
+    a.zones[0].type=ZONE_TYPE_SEGMENTED;
+    a.zones[0].flags|=ZONE_FLAG_MANUALLY_CONFIGURED_TYPE;
+    a.zones[0].segments={{0,3},{3,1}};
+    a.zones[1].leds_count=2;
+    a.zones[1].flags|=ZONE_FLAG_MANUALLY_CONFIGURED_SIZE;
+    for(int iteration=0;iteration<3;++iteration) {
+        a.DeviceConfigureZone(0);
+        check(a.zones[0].type==ZONE_TYPE_SEGMENTED, "Aura rebuild keeps configured segmented type");
+        check(a.zones[0].segments.size()==2 && a.zones[0].segments[0].start_idx==0 && a.zones[0].segments[1].start_idx==3,
+              "Aura rebuild preserves onboard and 12V segment offsets");
+        check(a.zones[0].segments[0].leds_count==3 && a.zones[0].segments[1].leds_count==1, "Aura segments retain distinct sizes");
+        check(a.zones[1].leds_count==2 && a.colors.size()==6 && a.leds.size()==6, "Aura ARGB configuration survives fixed geometry rebuild");
+        a.colors={11,22,33,44,55,66}; a.SetupColors();
+        a.DeviceUpdateSingleLED(3);
+        check(a.radio.last_channel==0 && a.radio.last_count==4 && a.radio.last_colors==a.zones[0].colors,
+              "12V single LED still writes full fixed channel, not ARGB");
+        check(a.radio.last_colors[0]==11 && a.radio.last_colors[3]==44, "Onboard and 12V colors keep wire order");
+        a.DeviceUpdateSingleLED(4);
+        check(a.radio.last_channel==1 && a.radio.last_count==2, "Next ARGB channel starts after all four fixed LEDs");
     }
     std::cout << assertions << " assertions passed (production methods; no hardware)\n";
 }

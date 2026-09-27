@@ -97,7 +97,7 @@ nlohmann::json NativeClient::Request(const char* path,const std::string& body)
     const auto value=nlohmann::json::parse(result.data(),nullptr,false);
     // layout is null until the guarded native composer is discovered.
     if(value.is_null() && operation==ROOM_SD_LAYOUT)throw std::runtime_error("Waiting for native Stream Deck layout");
-    if(!value.is_object())throw std::runtime_error("Invalid native compositor response");
+    if(!value.is_object())throw std::runtime_error("Invalid native compositor response (operation="+route+", type="+value.type_name()+")");
     if(operation==ROOM_SD_STATUS && value.value("errors",0)!=0)
         throw std::runtime_error("Native compositor reported a fault");
     return value;

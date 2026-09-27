@@ -70,8 +70,14 @@ had left the old service alive in session 0 on SDK port 6742.
   reducing unnecessary readbacks, its rainbow took 12.154 seconds (previously
   16.417 seconds). These are observed diagnostic rates, not promised output FPS.
   Restoration is verified on the existing authenticated connection before close.
-  Same-process immediate H6008 reconnection still needs separate verification;
-  a new session timing out is not represented as a successful reconnect.
+  Follow-up identified the same-process reconnect failure: firmware retains the
+  authenticated session while Windows closes/reopens the GATT objects. The native
+  transport now verifies the previous session with exact AA14 identity before
+  reuse, with fresh authentication if verification fails. Nine connections across
+  all three bulbs, plus three complete transport destructions/recreations, passed
+  with 36 successful state queries and no color/power commands. A bounded in-memory
+  cache survives rescans (16 entries, five-minute expiry, exact credentials scope,
+  mandatory AA14). Physical radio loss/power cycling remains untested in this run.
 * **Web Page effect**: the actual WebView2 runtime rendered local HTML and an
   animated HTTP loopback page at 800×600. 61 assertions covered pixels, routing,
   changing URLs, restart and cancellation. No RGB hardware was opened in this
@@ -95,3 +101,72 @@ had left the old service alive in session 0 on SDK port 6742.
   serialization normalization is omission of an empty matrix-map array. Native
   bounds and segment offsets are therefore verified beyond the synthetic tests.
   This does not activate the Visual Map layout or validate its appearance.
+
+## Final Full Scale migration
+
+The subsequent administrator ENE scan detected four DIMMs, each with eight LEDs,
+at addresses 0x70 through 0x73. A fresh ASUS-only executable export confirmed the
+fixed four-LED zone's type/segment capabilities, without exposing a resize flag.
+The final import links all 101 active source elements to 111 members: 1,120 LED
+routes, one native Stream Deck image and one 512-sample wallpaper SDK4 matrix.
+The original SignalRGB layout and registry are unchanged.
+
+37 Python import tests and 218 native reconfiguration assertions pass. Both
+installed maps were parsed by the actual Qt codec. Independent C++ routing tests
+checked 9,056 assertions over Stream Deck and wallpaper image geometry, including
+all compatibility/sample cells. The maximum UV error was 4.33e-15. The 103 members
+present in the earlier export retain their exact geometry. Full Scale is prepared
+for automatic loading/registration; the Music layout is kept manual to prevent
+two layouts from competing for the same physical outputs.
+
+Wallpaper Engine is the explicitly requested exception to bridge retirement.
+Its running application now serves one controller at 127.0.0.1:6743, negotiating
+SDK4 from an SDK7 request. Only its source and SDK-server settings changed; all
+20 wallpaper assets retain their hashes. Govee, NVIDIA and Stream Deck bridge
+processes and their supervisor startup were stopped/removed.
+
+## Installed startup and full-scene runtime
+
+The `OpenRGB Room` task starts the native executable directly, elevated in the
+interactive user session, 15 seconds after logon. Old SignalRGB/OpenRGB startup
+entries are disabled, and their services are stopped/manual. No Govee, NVIDIA or
+Stream Deck bridge process remains. The Wallpaper Engine exception is retained.
+Startup definitions were backed up before mutation.
+
+The 21 unused Corsair/Nollie outputs are explicitly configured with zero LEDs.
+The zone-initialization check remains enabled. A restart no longer requires the
+dialog to be dismissed, and the real SDK snapshot has no unconfigured zones.
+
+The first complete GUI run exposed a missed Effects remap when Visual Map
+registered its virtual controller on the GUI thread. Same-thread blocking Qt
+delivery is invalid: Qt 6.8.3 rejected the test call without remapping. Effects
+now dispatches directly on its own thread and synchronously queues other threads.
+Actual Qt regression tests cover both cases. After the fix, Full Scale and its
+800x500, 30 FPS spatial shader start without manual reconfiguration. Two live SDK
+snapshots, one second apart, show animated color buffers on 25 controllers,
+including the 512-point wallpaper. Stream Deck and the virtual canvas use native
+images, so their black compatibility buffers are not evidence of a black image.
+
+During this final run the AW3426DW USB interface and G502 receiver were absent
+from Windows; their saved mappings are retained. Earlier native monitor output
+was visually confirmed, and earlier mouse discovery/zone mapping was verified,
+but this run does not establish mouse light output or G915 coexistence.
+
+The four BLE devices enter streaming automatically. Two H6008 connections still
+drop periodically under the observed radio conditions; native session recovery
+reconnects them. A bounded AA01 retry does not prevent a real link loss. The
+implementation and diagnostics distinguish missed replies from closed sessions;
+this observation must not be reported as uninterrupted long-term BLE operation.
+
+The follow-up BLE change aborts a reply wait when an already-authenticated GATT
+session closes, without retrying that closed link. Initial authentication is
+exempt. Fifty session/authentication/query tests, crypto tests and compilation
+of the three Windows translation units pass.
+
+Intermittent native Stream Deck response warnings led to a confirmed race:
+the RPC callback could publish its ready flag before copying the JSON payload.
+The response, errors and request ID now share a mutex; detachment is atomic.
+The old callback reproduces a ready/null result in the regression test. The fix
+passes 2,000 concurrent 16 KB responses plus a real Frida synthetic-child test
+with twenty 311,040-byte frames, bounded timeout, restoration and close. This
+establishes the race fix, not the cause of every prior live warning.

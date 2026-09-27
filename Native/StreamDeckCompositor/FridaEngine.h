@@ -3,6 +3,7 @@
 /* Internal engine; production exports never accept caller-supplied JavaScript.
  * The synthetic-process test uses this class directly with an inert RPC script. */
 #include "frida-core.h"
+#include "RpcResponse.h"
 #pragma comment(lib,"setupapi.lib")
 #include <nlohmann/json.hpp>
 #include <chrono>
@@ -11,6 +12,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <atomic>
 #ifdef ROOM_SD_ENGINE_TRACE
 #include <cstdio>
 #define ROOM_SD_TRACE(value) std::fprintf(stderr,"engine: %s\n",value)
@@ -45,28 +47,13 @@ class Engine {
     FridaSession* session=nullptr;FridaScript* script=nullptr;
     gulong message_handler=0,detach_handler=0;
     std::thread::id owner=std::this_thread::get_id();
-    std::uint64_t next_id=0,waiting_id=0;
-    bool replied=false,loaded=false,detached=false;Json reply;
-    std::string failure,rpc_error;
+    std::uint64_t next_id=0;
+    bool loaded=false;
+    std::atomic<bool> detached{false};
+    RpcResponse response;
     static void Message(FridaScript*,const gchar* text,GBytes*,gpointer self)
     {
-        auto& engine=*static_cast<Engine*>(self);
-        try {
-            const auto value=Json::parse(text,nullptr,false);
-            if(!value.is_object())return;
-            if(value.value("type","")=="error") {engine.failure="Guarded compositor script failed";return;}
-            if(value.value("type","")!="send" || !value.contains("payload"))return;
-            const auto& payload=value["payload"];
-            if(payload.is_array() && payload.size()>=4 && payload[0]=="frida:rpc"
-               && payload[1].is_number_unsigned() && payload[1].get<std::uint64_t>()==engine.waiting_id)
-            {
-                engine.replied=true;
-                if(payload[2]=="ok")engine.reply=payload[3];
-                else engine.rpc_error=payload[3].is_string()?payload[3].get<std::string>():"RPC rejected";
-            }
-            else if(payload.is_object() && payload.value("event","")=="native-error")
-                engine.failure="Native compositor reported a fault";
-        }catch(...){engine.failure="Invalid native compositor response";}
+        static_cast<Engine*>(self)->response.Message(text);
     }
     static void Detached(FridaSession*,FridaSessionDetachReason,FridaCrash*,gpointer self)
     { static_cast<Engine*>(self)->detached=true; }
@@ -108,24 +95,32 @@ public:
         {Cancellation timeout;frida_script_load_sync(script,timeout,&error);}
         ThrowError(error,"Script loading failed");loaded=true;Pump();
         ROOM_SD_TRACE("loaded");
-        if(!failure.empty())throw std::runtime_error(failure);
+        const auto fault=response.Read().fault;
+        if(!fault.empty())throw std::runtime_error(fault);
     }
     Json Call(const char* method,const Json& arguments=Json::array(),const void* data=nullptr,std::size_t size=0,unsigned timeout_ms=1500)
     {
         CheckThread();Pump();
         if(!script || !loaded || detached)throw std::runtime_error("Compositor session is disconnected");
-        if(!failure.empty())throw std::runtime_error(failure);
-        waiting_id=++next_id;replied=false;rpc_error.clear();reply=nullptr;
+        const auto fault=response.Read().fault;
+        if(!fault.empty())throw std::runtime_error(fault);
+        const auto waiting_id=++next_id;response.Begin(waiting_id);
         const auto command=Json::array({"frida:rpc",waiting_id,"call",method,arguments}).dump();
         GBytes* bytes=data?g_bytes_new(data,size):nullptr;
         frida_script_post(script,command.c_str(),bytes);if(bytes)g_bytes_unref(bytes);
         const auto deadline=Clock::now()+std::chrono::milliseconds(timeout_ms);
-        while(!replied && !detached && failure.empty() && Clock::now()<deadline)
-        {Pump();if(!replied)std::this_thread::sleep_for(std::chrono::milliseconds(1));}
-        if(!failure.empty())throw std::runtime_error(failure);
-        if(!replied)throw std::runtime_error("Native compositor RPC timed out or detached");
-        if(!rpc_error.empty())throw std::runtime_error(rpc_error);
-        return reply;
+        do {
+            Pump();
+            const auto result=response.Read();
+            if(!result.fault.empty())throw std::runtime_error(result.fault);
+            if(result.completed) {
+                if(!result.error.empty())throw std::runtime_error(result.error);
+                return result.value;
+            }
+            if(detached || Clock::now()>=deadline)break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }while(true);
+        throw std::runtime_error("Native compositor RPC timed out or detached");
     }
     bool Restore(std::string& detail)
     {

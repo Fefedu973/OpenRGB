@@ -51,13 +51,14 @@ Primary comparisons:
 - [Microsoft GATT client lifecycle](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/gatt-client)
 - [Bleak WinRT implementation](https://github.com/hbldh/bleak/blob/develop/bleak/backends/winrt/client.py)
 
-The production transport performs the existing short CCCD None/settling cleanup.
-This probe introduces no further production retry, cache or sleep changes.
+The production transport performs the short CCCD None/settling cleanup and the
+identity-verified authentication recovery described below. Comparison flags are
+diagnostic only; they do not change production configuration.
 
-## Native observations, 27 September 2026
+## Historical failure, 27 September 2026
 
 One configured H6008 was probed with two cycles per comparison, without any
-lighting-state writes. The current transport passed its first connection,
+lighting-state writes. The then-current transport passed its first connection,
 identity check and three state queries, then failed its second E701 with zero
 notification callbacks. This repeated both with no added gap and with a 2 s
 gap. CCCD subscription and unsubscription reported Success; a first-cycle CCCD
@@ -67,15 +68,51 @@ parsing/checksum rejection as the immediate reason in these attempts.
 Full-service enumeration, a new transport object and a new MTA thread each
 gave the same first-cycle success/second-cycle failure. ATT WriteWithResponse
 for E7 was rejected with `0x80650003` (write not permitted) even on the first
-cycle and is not suitable for this H6008 path. No comparison is promoted as a
-reconnection fix. The exact cause of the missing second-session notifications
-remains unresolved; Windows radio connection lifetime and firmware session
-state are hypotheses, not established conclusions. A fresh process continued
+cycle and is not suitable for this H6008 path. None of these changes repaired
+reconnection. A fresh process continued
 to succeed on its initial connection between these comparisons.
 
 The final isolated `clear-factory-cache` comparison completed in 7.744 s under
 a 30 s process deadline. Cycle 1 passed with six notifications; cycle 2 again
 timed out at E701 with zero callbacks despite successful CCCD subscription.
 Clearing activation factories is therefore not a demonstrated fix either.
-Hardware investigation stopped after this bounded comparison. No process
-bridge, adapter reset or production cache-clearing policy was introduced.
+No process bridge, adapter reset or production cache-clearing policy was introduced.
+
+## Native session recovery, subsequently verified
+
+A discriminating read-only probe retained the first authenticated session key
+only in memory, closed/reopened the GATT objects, then sent AA14 using that key
+**before** any new E7. It received an exact identity response followed by all
+three state replies. Thus notification delivery still worked: the peripheral
+accepted the prior authenticated session while ignoring a fresh E701.
+
+`H6008Authentication` now keeps one verified credential and, when necessary,
+one pending E702 credential per transport. Each connection validates AA14 before
+the native transport becomes authenticated or may send a lighting packet. A
+timeout can proceed to fresh authentication, a different identity cannot.
+The last verified key survives an isolated lost reply. No key is persisted.
+An authenticated transport can hand its candidates to the bounded process
+cache when closing: exact BLE/profile/AA14/root-credential matching prevents
+cross-device/configuration reuse. Local copies are wiped on destruction;
+shared entries expire after five minutes (pruned on access), are consumed before
+validation, and are securely erased on removal. The cache holds at most 16 entries.
+
+With the production code, three consecutive cycles on each of three H6008
+units succeeded: **9/9 connections and 27/27 state queries**, zero lighting
+writes, six retained-session resumes taking **152–168 ms**. The first connection
+used E701/E702; each resume reported `retainedSessionVerified=true`. The
+sanitized result is [reconnect-validation.json](reconnect-validation.json).
+The `retained-session` probe name remains an alias for the current production
+policy to make the original discriminator reproducible.
+
+The subsequent `new-object` test destroyed the complete WindowsTransport after
+each cycle and constructed a new one, preserving only the native process cache.
+It passed three connections and nine state queries in 2.263 s; the two identity-
+verified resumes took 295 ms and 151 ms. This covers the transport recreation
+needed by a same-process rescan, in addition to the original worker reconnect.
+
+Scope: this physically verifies GATT close/reopen and whole native transport recreation.
+Actual power cycling/radio loss was not induced; expired-key fallback, response
+loss, wrong-identity handling, expiry and eviction are covered by fourteen fake-
+radio tests. A UI rescan itself was not driven by this probe; its underlying
+transport lifecycle was exercised directly. Long-duration radio recovery is not claimed.

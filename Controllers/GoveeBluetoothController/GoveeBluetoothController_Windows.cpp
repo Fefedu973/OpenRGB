@@ -16,6 +16,9 @@
 #include <winrt/Windows.Storage.Streams.h>
 #include "GoveeBluetoothController_Windows.h"
 #include "GoveeBluetoothSession.h"
+#include "GoveeBluetoothAuthentication.h"
+#include "GoveeBluetoothCredentialCache.h"
+#include "GoveeBluetoothQuery.h"
 #include "LogManager.h"
 #endif
 #include <algorithm>
@@ -118,7 +121,9 @@ struct TransportDiagnostics
     int disconnect_connection_status = -1, disconnect_session_status = -1;
     int64_t subscribe_ms = -1, unsubscribe_ms = -1;
     unsigned int notification_events = 0, wrong_length = 0, callback_errors = 0;
+    unsigned int query_timeouts = 0, query_retries = 0, query_recoveries = 0;
     bool authenticated = false;
+    bool retained_session_verified = false;
 };
 
 // Only the standalone read-only probe supplies these comparison options.
@@ -129,12 +134,46 @@ struct TransportProbeOptions
     bool auth_write_response = false;
 };
 
+static std::shared_ptr<CredentialCache> ProcessCredentials()
+{
+    // Each transport keeps shared ownership. Static teardown cannot destroy the
+    // cache while a controller's worker is still finishing its own cleanup.
+    static const auto cache = std::make_shared<CredentialCache>();
+    return cache;
+}
+static uint64_t CredentialTime()
+{
+    return static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(
+        Clock::now().time_since_epoch()).count());
+}
+static CredentialScope ConfigurationScope(const Configuration& configuration)
+{
+    CredentialScope scope;
+    scope.address = configuration.address;
+    scope.wifi_identity = configuration.wifi_mac;
+    scope.profile = configuration.profile;
+    scope.root = configuration.key;
+    return scope;
+}
+
 class WindowsTransport : public Transport
 {
 public:
     WindowsTransport(const Configuration& configuration_, std::atomic<bool>& stop_, TransportProbeOptions probe_options_ = {}) :
-        configuration(configuration_), stop(stop_), inbox(std::make_shared<Inbox>()), probe_options(probe_options_) {}
-    ~WindowsTransport() override { Disconnect(); SecureZeroMemory(session_key.data(), session_key.size()); }
+        configuration(configuration_), stop(stop_), inbox(std::make_shared<Inbox>()), probe_options(probe_options_),
+        authentication(configuration_.wifi_mac),
+        credential_cache(configuration_.profile == Profile::H6008 ? ProcessCredentials() : nullptr),
+        credential_scope(ConfigurationScope(configuration_))
+    {
+        if(credential_cache)
+            if(auto candidates = credential_cache->Take(credential_scope, CredentialTime()))
+                authentication.ImportCandidates(*candidates);
+    }
+    ~WindowsTransport() override
+    {
+        Disconnect();
+        SecureZeroMemory(session_key.data(), session_key.size());
+    }
 
     bool Connected() const override
     {
@@ -170,6 +209,10 @@ public:
     void Connect() override
     {
         Disconnect();
+        // A failed AA14/fresh handshake must not leave an unchecked entry in
+        // the process handoff cache. This transport may retain its own bounded
+        // candidates to distinguish a lost response from an expired session.
+        if(credential_cache) credential_cache->Erase(credential_scope);
         diagnostics = TransportDiagnostics{};
         // A late callback from the old GATT connection may still run after its
         // event token is revoked. A fresh inbox isolates connection generations.
@@ -283,26 +326,17 @@ public:
             subscribed = true;
             if(configuration.profile == Profile::H6008)
             {
-                Packet response{};
-                for(unsigned int attempt = 0; attempt < 2; ++attempt)
-                {
-                    ClearInbox();
-                    WriteRaw(Crypt(Handshake(1), configuration.key, false), true);
-                    try { response = Receive(0xE7, 1, &configuration.key); break; }
-                    catch(const ReplyTimeout&) { if(attempt == 1) throw; }
-                }
-                Key candidate{};
-                std::copy_n(response.begin() + 2, 16, candidate.begin());
-                ClearInbox();
-                WriteRaw(Crypt(Handshake(2), configuration.key, false), true);
-                Receive(0xE7, 2, &configuration.key);
-                session_key = candidate;
+                const auto result = authentication.Connect(configuration.key,
+                    [this](uint8_t prefix, uint8_t command, const Key& key)
+                    {
+                        ClearInbox();
+                        const Packet request = prefix == 0xE7 ? Handshake(command) : MakePacket(prefix, command);
+                        WriteRaw(Crypt(request, key, false), prefix == 0xE7);
+                        return Receive(prefix, command, &key);
+                    });
+                session_key = authentication.VerifiedKey();
                 authenticated = true;
-                const Packet identity = Query(0x14);
-                uint64_t reported = 0;
-                for(unsigned int index = 2; index < 8; ++index) reported = (reported << 8) | identity[index];
-                if(reported != configuration.wifi_mac)
-                    throw std::runtime_error("Govee BLE authenticated AA14 identity mismatch");
+                diagnostics.retained_session_verified = result == H6008Authentication::Result::Resumed;
             }
             else authenticated = true;
         }
@@ -318,15 +352,37 @@ public:
 
     Packet Query(uint8_t command) override
     {
-        const unsigned int attempts = configuration.profile == Profile::H6159 ? 2 : 1;
-        for(unsigned int attempt = 0; attempt < attempts; ++attempt)
+        unsigned int attempts = 0;
+        try
         {
-            ClearInbox();
-            Send(configuration.profile == Profile::H6008 && command == 5 ? MakePacket(0xAA, 5, {1}) : MakePacket(0xAA, command));
-            try { return Receive(0xAA, command, configuration.profile == Profile::H6008 ? &session_key : nullptr); }
-            catch(const ReplyTimeout&) { if(attempt + 1 == attempts) throw; }
+            const auto result = QueryWithRetry<ReplyTimeout>(configuration.profile, command,
+                [this, command, &attempts](unsigned int attempt)
+                {
+                    attempts = attempt;
+                    if(attempt > 1) ++diagnostics.query_retries;
+                    ClearInbox();
+                    Send(configuration.profile == Profile::H6008 && command == 5 ? MakePacket(0xAA, 5, {1}) : MakePacket(0xAA, command));
+                    try { return Receive(0xAA, command, configuration.profile == Profile::H6008 ? &session_key : nullptr); }
+                    catch(const ReplyTimeout&) { ++diagnostics.query_timeouts; throw; }
+                });
+            if(result.attempts > 1)
+            {
+                ++diagnostics.query_recoveries;
+                LOG_WARNING("[Govee BLE] %s: AA%02X reply recovered on the same connection after one retry (timeouts=%u retries=%u recoveries=%u)",
+                    configuration.name.c_str(), static_cast<unsigned int>(command), diagnostics.query_timeouts,
+                    diagnostics.query_retries, diagnostics.query_recoveries);
+            }
+            return result.reply;
         }
-        throw std::runtime_error("Govee BLE query did not execute");
+        catch(const ReplyTimeout& error)
+        {
+            const auto status = Diagnostics();
+            throw std::runtime_error(std::string(error.what()) + " attempts=" + std::to_string(attempts) +
+                " connection_status=" + std::to_string(status.connection_status) +
+                " session_status=" + std::to_string(status.session_status) +
+                " notification_events=" + std::to_string(status.notification_events) +
+                " query_timeouts=" + std::to_string(status.query_timeouts));
+        }
     }
 
     void Disconnect() noexcept override
@@ -336,6 +392,11 @@ public:
         {
             diagnostics.disconnect_connection_status = before.connection_status;
             diagnostics.disconnect_session_status = before.session_status;
+        }
+        if(authenticated && credential_cache)
+        {
+            try { credential_cache->Store(credential_scope, authentication.ExportCandidates(), CredentialTime()); }
+            catch(...) { /* Cache allocation failure must not prevent GATT cleanup. */ }
         }
         authenticated = false;
         // Match stop_notify before revoking the callback. This is best effort:
@@ -391,10 +452,10 @@ public:
     }
 
 private:
-    struct ReplyTimeout : std::runtime_error
+    struct ReplyTimeout : AuthenticationReplyTimeout
     {
         ReplyTimeout(uint8_t prefix, uint8_t command, unsigned int received, unsigned int invalid, unsigned int unrelated) :
-            std::runtime_error(Message(prefix, command, received, invalid, unrelated)) {}
+            AuthenticationReplyTimeout(Message(prefix, command, received, invalid, unrelated)) {}
         static std::string Message(uint8_t prefix, uint8_t command, unsigned int received, unsigned int invalid, unsigned int unrelated)
         {
             std::ostringstream text;
@@ -456,6 +517,11 @@ private:
         while(Clock::now() < deadline)
         {
             if(Interrupted()) throw std::runtime_error("Govee BLE reply wait cancelled");
+            // Session closure is a connection failure, not a missing reply.
+            // Abort before another 25ms wait so Query cannot retry a dead link.
+            // Initial E7/AA14 authentication runs with authenticated=false.
+            if(authenticated && (!session || session.SessionStatus() == GattSessionStatus::Closed))
+                throw std::runtime_error("Govee BLE GATT session closed while waiting for a reply");
             Packet packet{};
             {
                 std::unique_lock<std::mutex> lock(inbox->mutex);
@@ -486,6 +552,9 @@ private:
     Key session_key{};
     TransportDiagnostics diagnostics;
     const TransportProbeOptions probe_options;
+    H6008Authentication authentication;
+    std::shared_ptr<CredentialCache> credential_cache;
+    CredentialScope credential_scope;
 };
 
 Controller::Controller(Configuration configuration_) : configuration(std::move(configuration_))

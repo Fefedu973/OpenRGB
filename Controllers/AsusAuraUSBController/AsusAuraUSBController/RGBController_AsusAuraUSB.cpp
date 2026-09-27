@@ -155,7 +155,14 @@ void RGBController_AuraUSB::SetupZones()
         if(device_info.device_type == AuraDeviceType::FIXED)
         {
             zones[channel_idx].name                     = "Aura Mainboard";
-            zones[channel_idx].type                     = ZONE_TYPE_LINEAR;
+            // Logical segments split onboard LEDs from the trailing 12 V
+            // headers without changing their physical count or packet order.
+            zones[channel_idx].flags                  |= ZONE_FLAG_MANUALLY_CONFIGURABLE_TYPE
+                                                        | ZONE_FLAG_MANUALLY_CONFIGURABLE_SEGMENTS;
+            if(!(zones[channel_idx].flags & ZONE_FLAG_MANUALLY_CONFIGURED_TYPE))
+            {
+                zones[channel_idx].type                 = ZONE_TYPE_LINEAR;
+            }
             zones[channel_idx].leds_min                 = device_info.num_leds;
             zones[channel_idx].leds_max                 = device_info.num_leds;
             zones[channel_idx].leds_count               = device_info.num_leds;

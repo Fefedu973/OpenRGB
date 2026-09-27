@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "sources": {
+    "corsair_core": "Controllers/CorsairLightingNodeController/RGBController_CorsairLightingNode.cpp",
+    "nollie32": "Controllers/NollieController/NollieDevices.cpp",
+    "asus_aura": "Controllers/AsusAuraUSBController/AsusAuraUSBController/AsusAuraMainboardController.cpp",
+    "govee_lan": "Controllers/GoveeController/RGBController_Govee.cpp",
+    "component_mapping": "https://docs.signalrgb.com/plugins/component-structure/"
+  },
+  "usb": {
+    "1b1c:0c1a": {"family": "corsair_core", "channel_prefix": "Corsair RGB Header ", "max_leds": 204, "physical_channels": 1},
+    "3061:4714": {"family": "nollie32", "channel_prefix": "Channel ", "max_leds": 256, "physical_channels": 32},
+    "0b05:19af": {"family": "asus_aura", "channel_prefix": "Addressable RGB Header ", "max_leds": null, "physical_channels": null,
+      "fixed_zone": {"name": "Aura Mainboard", "index": 0, "order": "onboard_then_12v_headers"}}
+  },
+  "govee_lan": {"H61E1": 30, "H61A0": 25, "H61A2": 42, "H6062": 57},
+  "nollie_strimer": {
+    "24PinStrimer": {"name_prefix": "Channel ATX ", "first_zone": 16, "rows": 6, "leds_per_row": 20, "usb_channels": [19, 18, 17, 16, 7, 6]},
+    "Dual8PinStrimer": {"name_prefix": "Channel GPU ", "first_zone": 22, "rows": 4, "leds_per_row": 27, "usb_channels": [25, 24, 23, 22]}
+  }
+}

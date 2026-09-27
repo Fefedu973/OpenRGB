@@ -1,0 +1,152 @@
+{
+  "date": "2026-09-27",
+  "model": "H6008",
+  "policy": "identity-verified-memory-session-v2-process-handoff",
+  "lighting_writes": 0,
+  "connections_passed": 9,
+  "state_queries_passed": 27,
+  "native_gatt_close_reopen_tested": true,
+  "physical_radio_loss_tested": false,
+  "whole_controller_recreation_tested": false,
+  "units": [
+    {
+      "unit": 1,
+      "ok": true,
+      "cycles": [
+        {
+          "cycle": 1,
+          "ok": true,
+          "connect_ms": 977,
+          "state_queries": 3,
+          "retained_session_verified": false,
+          "notification_events": 6
+        },
+        {
+          "cycle": 2,
+          "ok": true,
+          "connect_ms": 155,
+          "state_queries": 3,
+          "retained_session_verified": true,
+          "notification_events": 4
+        },
+        {
+          "cycle": 3,
+          "ok": true,
+          "connect_ms": 154,
+          "state_queries": 3,
+          "retained_session_verified": true,
+          "notification_events": 4
+        }
+      ]
+    },
+    {
+      "unit": 2,
+      "ok": true,
+      "cycles": [
+        {
+          "cycle": 1,
+          "ok": true,
+          "connect_ms": 1392,
+          "state_queries": 3,
+          "retained_session_verified": false,
+          "notification_events": 6
+        },
+        {
+          "cycle": 2,
+          "ok": true,
+          "connect_ms": 168,
+          "state_queries": 3,
+          "retained_session_verified": true,
+          "notification_events": 4
+        },
+        {
+          "cycle": 3,
+          "ok": true,
+          "connect_ms": 159,
+          "state_queries": 3,
+          "retained_session_verified": true,
+          "notification_events": 4
+        }
+      ]
+    },
+    {
+      "unit": 3,
+      "ok": true,
+      "cycles": [
+        {
+          "cycle": 1,
+          "ok": true,
+          "connect_ms": 1299,
+          "state_queries": 3,
+          "retained_session_verified": false,
+          "notification_events": 6
+        },
+        {
+          "cycle": 2,
+          "ok": true,
+          "connect_ms": 152,
+          "state_queries": 3,
+          "retained_session_verified": true,
+          "notification_events": 4
+        },
+        {
+          "cycle": 3,
+          "ok": true,
+          "connect_ms": 156,
+          "state_queries": 3,
+          "retained_session_verified": true,
+          "notification_events": 4
+        }
+      ]
+    }
+  ],
+  "recreation": {
+    "unit": 1,
+    "transport_objects_created": 3,
+    "ok": true,
+    "elapsed_ms": 2263,
+    "lighting_writes": 0,
+    "connections_passed": 3,
+    "state_queries_passed": 9,
+    "ui_rescan_triggered": false,
+    "cycles": [
+      {
+        "cycle": 1,
+        "ok": true,
+        "connect_ms": 1049,
+        "state_queries": 3,
+        "retained_session_verified": false,
+        "notification_events": 6
+      },
+      {
+        "cycle": 2,
+        "ok": true,
+        "connect_ms": 295,
+        "state_queries": 3,
+        "retained_session_verified": true,
+        "notification_events": 4
+      },
+      {
+        "cycle": 3,
+        "ok": true,
+        "connect_ms": 151,
+        "state_queries": 3,
+        "retained_session_verified": true,
+        "notification_events": 4
+      }
+    ]
+  },
+  "cache": {
+    "capacity": 16,
+    "ttl_ms": 300000,
+    "expiry_checked_on_access": true,
+    "persisted": false,
+    "scope": [
+      "ble_address",
+      "profile",
+      "aa14_identity",
+      "root_credential"
+    ]
+  },
+  "whole_transport_recreation_tested": true
+}

@@ -14,6 +14,14 @@ cl /nologo /EHsc /std:c++17 /W4 /I. GoveeBluetoothProtocol.cpp GoveeBluetoothSes
 if errorlevel 1 (popd & exit /b 1)
 "%GOVEE_BLE_TEST_OUTDIR%\session_tests.exe"
 if errorlevel 1 (popd & exit /b 1)
+cl /nologo /EHsc /std:c++17 /W4 /I. GoveeBluetoothProtocol.cpp tests\authentication_tests.cc /Fe:"%GOVEE_BLE_TEST_OUTDIR%\authentication_tests.exe" /Fo:"%GOVEE_BLE_TEST_OUTDIR%\\"
+if errorlevel 1 (popd & exit /b 1)
+"%GOVEE_BLE_TEST_OUTDIR%\authentication_tests.exe"
+if errorlevel 1 (popd & exit /b 1)
+cl /nologo /EHsc /std:c++17 /W4 /I. GoveeBluetoothProtocol.cpp GoveeBluetoothSession.cpp tests\query_tests.cc /Fe:"%GOVEE_BLE_TEST_OUTDIR%\query_tests.exe" /Fo:"%GOVEE_BLE_TEST_OUTDIR%\\"
+if errorlevel 1 (popd & exit /b 1)
+"%GOVEE_BLE_TEST_OUTDIR%\query_tests.exe"
+if errorlevel 1 (popd & exit /b 1)
 cl /nologo /EHsc /std:c++17 /W4 /I. GoveeBluetoothProtocol.cpp tests\crypto_tests.cc /Fe:"%GOVEE_BLE_TEST_OUTDIR%\crypto_tests.exe" /Fo:"%GOVEE_BLE_TEST_OUTDIR%\\"
 if errorlevel 1 (popd & exit /b 1)
 "%GOVEE_BLE_TEST_OUTDIR%\crypto_tests.exe"

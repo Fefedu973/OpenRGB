@@ -89,11 +89,11 @@ throughput depends on the page and CPU image capture. See the Effects fork's
 See [French startup and Web Page instructions](docs/room/DEMARRAGE.md) for the
 local candidate, ownership requirements and current validation limits.
 
-Keep the existing working setup until testing each port. Stop SignalRGB and other
-RGB hardware owners, including any OpenRGB Windows service, before detection. For BLE, suspend the old
-Govee companion/supervisor; closing SignalRGB alone does not release that radio
-connection. Keep the Elgato application open for background mode; suspend the
-Python compositor when selecting the native in-process transport.
+Do not run competing RGB hardware owners. The native migration retires the
+Govee, NVIDIA and Stream Deck bridge processes and their supervisor. Keep the
+Elgato application open for its actions/icons. The user explicitly keeps the
+existing Wallpaper Engine bridge as the sole exception: OpenRGB connects to its
+loopback SDK server, with no SignalRGB dependency in that route.
 
 The portable candidate uses a separate `--config` directory. It does not import or
 overwrite the normal OpenRGB profile or SignalRGB registry. The launcher checks
@@ -110,14 +110,20 @@ Configure physical strip lengths/channel order only after enumerating the device
 to the native profile format. Keep its output in `private/`; addresses, session
 tokens and communication keys are never part of the public repository.
 
-The Full Scale canvas export preserves positions, rotations, scaling, components
-and LED order. Actual OpenRGB identity/LED bindings still require hardware
-enumeration; the exporter deliberately leaves unverified bindings empty. The
-Screen Ambience scene and a native wallpaper renderer are not delivered yet.
+The Full Scale migration now binds all 101 active elements using native device
+descriptions and the wallpaper SDK descriptor, preserving positions, rotations,
+scaling, component shapes and LED order. The public importer still rejects
+unverified identities. Private exports/settings are not published. The Screen
+Ambience scene and a new native wallpaper renderer are not delivered; the latter
+is unnecessary for the chosen Wallpaper Engine integration.
 
-This is a development branch, not an installed replacement or an autostart
-migration. Hardware testing and native wallpaper/GPU-texture integration remain
-separate steps. Existing upstream licenses and third-party notices apply.
+The one-shot `Install-NativeStartup.ps1` installs a direct elevated OpenRGB task
+after validation, retiring conflicting startup entries with backups. There is no
+external supervisor. See `docs/room/DEMARRAGE.md` for the machine-local delivery
+and `startup-install-result.json` in its private configuration for installation
+status. This remains a development fork; physical radio-loss endurance and G915
+coexistence with an actual keyboard still need validation. Existing upstream
+licenses and third-party notices apply.
 
 `--virtual-only --noautoconnect` starts configured `VirtualScreens` without a
 hardware scan. It is useful for SDK/image development alongside the normal RGB

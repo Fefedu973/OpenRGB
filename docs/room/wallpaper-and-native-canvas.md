@@ -17,11 +17,30 @@ Local protocol test passed: version6 request negotiated4; one32×16 controller
 enumerated; all512 RGB values in a test frame arrived unchanged at the wallpaper
 callback. No OpenRGB GUI or real desktop renderer was started for this test.
 
-Existing user configuration already has `openrgbSdkServer`, disabled, and its
-screen sources still point to SignalRGB. It has not been modified. To switch
-later: enable that server in Integrations, set the intended screen source to
-OpenRGB SDK, then connect OpenRGB's SDK client to127.0.0.1:6743. This is a client
-connection, not OpenRGB's own server on6742. Keep only one source per screen.
+The user explicitly chose to retain this one external bridge for Wallpaper
+Engine, preserving the existing wallpaper, glow, assets and renderer. No native
+desktop replacement was added. On 27 September 2026 the running bridge 2.5.0
+was configured through its own WebSocket settings API: SDK server enabled on
+`127.0.0.1:6743`, active screen 0 source set to `openrgb-sdk`. The existing
+32×16 matrix was preserved. Inactive screen slots were left unchanged.
+
+Read-only enumeration of the actual server requested SDK 7 and negotiated SDK 4:
+one device named `Wallpaper Screen 1`, vendor `SignalRGB Wallpaper Bridge`,
+empty serial, location `bridge`, zone 0 with 512 row-major samples. This server
+does not advertise the Room native-image extension. Its matrix is a color field
+consumed by the existing Wallpaper Engine renderer, not a 512-pixel replacement
+for the desktop image. No test colors were sent during this configuration step.
+
+Backups taken through `/backup` before and after the change confirmed that only
+`openrgbSdkServer` and `sources` changed; all 20 asset files retained their
+SHA-256 hashes, and all other configuration values matched. Private evidence and
+raw descriptors are under `private/wallpaper-migration/` and are not published.
+The existing Windows `SignalRGBWallpaperBridge` startup entry was preserved.
+
+The prepared OpenRGB configuration now has a `Client.clients` entry for
+`127.0.0.1:6743`. This is an outgoing SDK client connection, separate from
+OpenRGB's own server on 6742. The Full Scale importer samples this ordinary
+matrix through the generic LED route; it must not claim SDK 7 image capability.
 
 ## Limits reproduced
 

@@ -60,7 +60,7 @@ struct Owner
 static json Metadata(const TransportDiagnostics& d)
 {
     return {{"connectionStatus", d.connection_status}, {"sessionStatus", d.session_status},
-        {"authenticated", d.authenticated}, {"cccdSubscribeStatus", d.subscribe_status},
+        {"authenticated", d.authenticated}, {"retainedSessionVerified", d.retained_session_verified}, {"cccdSubscribeStatus", d.subscribe_status},
         {"cccdSubscribeMs", d.subscribe_ms}, {"cccdUnsubscribeStatus", d.unsubscribe_status},
         {"cccdUnsubscribeMs", d.unsubscribe_ms}, {"disconnectConnectionStatus", d.disconnect_connection_status},
         {"disconnectSessionStatus", d.disconnect_session_status}, {"notificationEvents", d.notification_events},
@@ -107,7 +107,7 @@ int main(int argc, char** argv)
     {
         if(argc < 4 || argc > 7 || std::string(argv[1]) != "--read-only")
         {
-            std::cerr << "Usage: reconnect_probe --read-only ABS_CONFIG INDEX [CYCLES=2] [GAP_MS=0] [current|full-services|auth-write-response|new-object|new-mta|clear-factory-cache]\n"
+            std::cerr << "Usage: reconnect_probe --read-only ABS_CONFIG INDEX [CYCLES=2] [GAP_MS=0] [current|full-services|auth-write-response|new-object|new-mta|clear-factory-cache|retained-session]\n"
                          "Stop all BLE owners first. This only authenticates, subscribes and reads state.\n";
             return 2;
         }
@@ -116,7 +116,7 @@ int main(int argc, char** argv)
         const unsigned gap_ms = argc >= 6 ? std::stoul(argv[5]) : 0;
         const std::string variant = argc >= 7 ? argv[6] : "current";
         if(variant != "current" && variant != "full-services" && variant != "auth-write-response" &&
-           variant != "new-object" && variant != "new-mta" && variant != "clear-factory-cache")
+           variant != "new-object" && variant != "new-mta" && variant != "clear-factory-cache" && variant != "retained-session")
             throw std::runtime_error("Unknown probe variant");
         if(cycles < 1 || cycles > 3 || gap_ms > 10000) throw std::runtime_error("Probe bounds exceeded");
         CheckOwners();

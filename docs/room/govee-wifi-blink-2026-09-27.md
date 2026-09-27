@@ -35,8 +35,9 @@ The post-installation 24-second capture contains 1,681 valid B0 color frames acr
 all nine LAN devices, with **zero B1 activations, brightness commands, ON/OFF
 commands, black frames or malformed frames**. The capture reported no dropped
 packets. This verifies the running binary's outgoing traffic; it does not prove
-delivery at the bulbs or that the physical blink has disappeared. Visual
-confirmation was requested and is pending at this revision.
+delivery at the strips. The user subsequently watched the installation for about
+thirty seconds and confirmed that the black flashes had disappeared. Longer-term
+radio reliability was not measured by this short observation.
 
 Runtime SDK validation also found all 30 controllers, both H61A2 strips, 28 changing
 color buffers and both native image outputs. The original SignalRGB layout,

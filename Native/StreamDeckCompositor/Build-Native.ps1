@@ -21,6 +21,8 @@ $commands = @(
     'if errorlevel 1 exit /b 1'
 )
 if ($Tests) {
+    & node --test (Join-Path $PSScriptRoot 'test_background_core.cjs')
+    if ($LASTEXITCODE -ne 0) { throw 'Guarded compositor JavaScript tests failed' }
     $commands += "cl /nologo /EHsc /std:c++17 /MT /W4 /I`"$root\dependencies\json`" `"$PSScriptRoot\test_rpc_response.cpp`" /Fe:`"$build\test_rpc_response.exe`""
     $commands += @('if errorlevel 1 exit /b 1', "`"$build\test_rpc_response.exe`"",'if errorlevel 1 exit /b 1')
     $commands += "cl /nologo /EHsc /std:c++17 /MT /W4 /D_CRT_SECURE_NO_WARNINGS /I`"$sdk`" /I`"$root\dependencies\json`" `"$PSScriptRoot\test_native.cpp`" /Fe:`"$build\test_native.exe`" /link /LIBPATH:`"$sdk`" /INCREMENTAL:NO"

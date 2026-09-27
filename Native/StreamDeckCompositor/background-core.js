@@ -1,6 +1,6 @@
 'use strict';
 // Exact-build, in-memory compositor bridge. All paint work stays in the native
-// queued animate slot. No Storage calls, profile writes, or direct USB writes.
+// queued notification. No Storage calls, profile writes, or direct USB writes.
 const exe=Process.getModuleByName('StreamDeck.exe'),gui=Process.getModuleByName('Qt6Gui.dll'),core=Process.getModuleByName('Qt6Core.dll');
 // Frida process enumeration may omit this elevated process. Check the actual
 // main module before any interceptor or native call is created instead.
@@ -49,7 +49,8 @@ class FramePacing {
 }
 // END FRAME PACING
 const pacing=new FramePacing();
-const paintedKeys=new Set(),nativeThreads=new Set(),activeFrames=new Map();
+const paintedKeys=new Set(),nativeThreads=new Set(),activeFrames=new Map(),factoryCalls=new Map();
+let lastFrameCoverage=null;
 function emit(event,data={}){send({event,...data});}
 function check(m,rva,hex){const b=Array.from(new Uint8Array(m.base.add(rva).readByteArray(hex.length/2))).map(x=>x.toString(16).padStart(2,'0')).join('');if(b!==hex)throw Error('Unsupported code '+m.name+'+'+rva.toString(16));}
 function describe(p){try{const a=ptr(p),m=Process.findModuleByAddress(a);return m?m.name+'+'+a.sub(m.base):a.toString();}catch(_){return null;}}
@@ -59,11 +60,17 @@ check(exe,0x5c8550,'488bc444894018555356574154415541');
 check(exe,0x419a80,'48895c24185556574154415541564157');
 check(exe,0x41551b,'c744243002000000');
 check(exe,0x177c80,'48895c24084889742410574883ec20');
+check(exe,0x4164a0,'48895c2410488974241848897c242055');
+check(exe,0x5c52b0,'48895c242055565741564157');
+check(exe,0x5c544e,'0f57c00f11070f114710488d9680000000');
+check(exe,0x5c8a80,'48895c242055565741564157');
 check(gui,0x43970,'405355564883ec50');
 check(gui,0x3ab50,'40534883ec204883791000');
 const activate=new NativeFunction(core.getExportByName('?activate@QMetaObject@@SAXPEAVQObject@@PEBU1@HPEAPEAX@Z'),'void',['pointer','pointer','int','pointer'],'win64');
 const fill=new NativeFunction(gui.getExportByName('?fill@QImage@@QEAAXI@Z'),'void',['pointer','uint'],'win64');
 const bits=new NativeFunction(gui.getExportByName('?bits@QImage@@QEAAPEAEXZ'),'pointer',['pointer'],'win64');
+const originalAnimate=new NativeFunction(exe.base.add(0x419a80),'void',['pointer','pointer'],'win64');
+const renderGrid=new NativeFunction(exe.base.add(0x4164a0),'void',['pointer','uint'],'win64');
 function validTarget(t){return t&&t.composer.readPointer().equals(exe.base.add(0x166f090))&&t.owner.readPointer().equals(exe.base.add(0x16555e8))&&t.owner.add(0x18).readU32()===5&&t.owner.add(0x1c).readU32()===3;}
 function ownerOf(bundle){const composer=bundle.add(0x28).readPointer().sub(0x10),owner=composer.sub(0x4f0),t={composer,owner};return validTarget(t)?t:null;}
 function validTileImage(image){
@@ -108,17 +115,33 @@ function selectTarget(t,image){
 Interceptor.attach(exe.base.add(0x177c80),{onEnter(a){
  if(pending&&a[1].equals(pending.input)){pending.copies.add(a[0].toString());}
 }});
-Interceptor.attach(exe.base.add(0x419a80),{onEnter(a){
- this.tagged=null;
- if(target&&a[0].equals(target.owner)&&pending&&pending.copies.has(a[1].toString())){
-  this.tagged=pending;this.tid=Process.getCurrentThreadId();nativeThreads.add(this.tid);activeFrames.set(this.tid,this.tagged);
+// The usual animate slot filters out keys absent from the action map. Our
+// Qt-owned notification instead renders the existing full grid on THAT thread.
+// 0x20010 selects device output and skips layer reassignment; no actions are
+// created and the UI-preview branch is not requested. Untagged calls are intact.
+Interceptor.replace(exe.base.add(0x419a80),new NativeCallback((owner,vector)=>{
+ if(!target||!owner.equals(target.owner)||!pending||!pending.copies.has(vector.toString())){
+  originalAnimate(owner,vector);return;
  }
-},onLeave(){if(this.tagged)activeFrames.delete(this.tid);if(this.tagged&&pending===this.tagged){
- acknowledged++;if(pending.restore)restores++;
- pacing.ack(pending,Date.now());
- if(acknowledged<=3||acknowledged%100===0)emit('frame-ack',{sequence:pending.sequence,restore:pending.restore,latencyMs:Date.now()-pending.at});
- pending=null;
-}}});
+ const frame=pending,tid=Process.getCurrentThreadId();
+ try{
+  if(errors||!validTarget(target))throw Error('Tagged target expired or faulted');
+  // A queued image must not repaint after stop/lease expiry. Render the native
+  // page instead, through the same complete route used by explicit restoration.
+  if(!armed||Date.now()>=deadline){frame.restore=true;restore=false;}
+  frame.rendered=new Set();frame.injected=new Set();frame.empty=new Set();
+  nativeThreads.add(tid);activeFrames.set(tid,frame);
+  renderGrid(owner,0x20010);
+  lastFrameCoverage={sequence:frame.sequence,restore:frame.restore,rendered:frame.rendered.size,
+   injected:frame.injected.size,empty:frame.empty.size,actions:frame.rendered.size-frame.empty.size};
+  if(errors||!validTarget(target)||frame.rendered.size!==15||(!frame.restore&&frame.injected.size!==15))
+   throw Error('Incomplete native grid: '+JSON.stringify(lastFrameCoverage));
+  acknowledged++;if(frame.restore)restores++;
+  pacing.ack(frame,Date.now());
+  if(acknowledged<=3||acknowledged%100===0)emit('frame-ack',{...lastFrameCoverage,latencyMs:Date.now()-frame.at});
+ }catch(e){fail(e);}
+ finally{activeFrames.delete(tid);if(pending===frame)pending=null;}
+},'void',['pointer','pointer'],'win64'));
 function queueFrame(isRestore){
  const now=Date.now();
  if(!pacing.canQueue(!!target,!!pending,errors,now))return false;
@@ -134,13 +157,58 @@ function queueFrame(isRestore){
 }
 // Only our exact Qt notification uses synchronous composition. Preserve
 // bundle render options and set the non-filtering immediate-render bit0.
-check(exe,0x5c8a80,'48895c242055565741564157');
 Interceptor.attach(exe.base.add(0x5c8a80),{onEnter(a){
  if(errors||!activeFrames.has(Process.getCurrentThreadId()))return;
  try{
   const t=ownerOf(a[0]);if(!t||!target||!t.composer.equals(target.composer))return;
   a[3]=ptr((a[3].toInt32()||a[0].add(0x48).readU32())|1);
  }catch(e){fail(e);}
+}});
+function paintTile(image,key,frame){
+ if(!validTileImage(image))throw Error('Unexpected native tile image');
+ const frameTiles=frame?frame.tiles:tiles,frameColors=frame?frame.colors:colors;
+ if(frameTiles){
+  // Public bits() detaches the copy, including the shared native blank image.
+  const pixels=bits(image);
+  if(pixels.isNull()||!validTileImage(image))throw Error('Unexpected detached image stride');
+  pixels.writeByteArray(frameTiles[key]);
+ }else if(frameColors){const c=frameColors[key];fill(image,(0xff000000|(c[0]<<16)|(c[1]<<8)|c[2])>>>0);}
+ else throw Error('Missing frame pixels');
+ paints++;paintedKeys.add(key);if(frame)frame.injected.add(key);
+}
+// Observe the native factory while it owns the composer lock. The exact blank
+// branch is positive evidence of a copied empty tile: never infer emptiness from
+// a missed compose callback or overwrite an already composed action image.
+Interceptor.attach(exe.base.add(0x5c52b0),{onEnter(a){
+ this.tid=Process.getCurrentThreadId();
+ this.call={composer:a[0],out:a[1],key:a[2].toInt32(),keyPointer:a[2],blank:false};
+ const stack=factoryCalls.get(this.tid)||[];stack.push(this.call);factoryCalls.set(this.tid,stack);
+},onLeave(result){
+ const call=this.call,stack=factoryCalls.get(this.tid);
+ if(stack){stack.pop();if(!stack.length)factoryCalls.delete(this.tid);}
+ try{
+  if(errors||!result.equals(call.out)||call.key<0||call.key>=15||!call.keyPointer.equals(ptr(call.key)))return;
+  const t={composer:call.composer,owner:call.composer.sub(0x4f0)},image=call.out.add(0x20);
+  if(!validTarget(t)||(target&&!t.composer.equals(target.composer)))return;
+  if(!target&&!selectTarget(t,image))return;
+  const frame=activeFrames.get(this.tid);if(!frame)return;
+  if(!validTileImage(image))throw Error('Invalid factory tile');
+  if(call.blank){
+   frame.empty.add(call.key);
+   if(!frame.restore)paintTile(image,call.key,frame);
+  }
+  frame.rendered.add(call.key);
+ }catch(e){
+  // Other compositor classes also use this factory. An unrelated natural
+  // candidate must not fault our selected device; tagged render failures must.
+  if(activeFrames.has(this.tid))fail(e);
+ }
+}});
+Interceptor.attach(exe.base.add(0x5c544e),{onEnter(){
+ const stack=factoryCalls.get(Process.getCurrentThreadId()),call=stack&&stack[stack.length-1];
+ // RSI/RDI are the guarded function's composer/output locals, not arguments
+ // guessed at a mid-function address. This hook only records the branch.
+ if(call&&this.context.rsi.equals(call.composer)&&this.context.rdi.equals(call.out))call.blank=true;
 }});
 Interceptor.attach(exe.base.add(0x5c8550),{onEnter(a){
  compositions++;
@@ -151,24 +219,15 @@ Interceptor.attach(exe.base.add(0x5c8550),{onEnter(a){
   if(!armed||Date.now()>=deadline||errors)return;
   const frame=activeFrames.get(Process.getCurrentThreadId());
   if(frame&&frame.restore)return;
-  const frameTiles=frame?frame.tiles:tiles,frameColors=frame?frame.colors:colors;
   const key=bundle.readU64().toNumber();if(key<0||key>=15)return;
-  const d=image.add(16).readPointer();if(d.isNull())return;
-  if(d.add(4).readS32()!==72||d.add(8).readS32()!==72||![4,5,6].includes(d.add(64).readS32()))return;
-  if(frameTiles){
-   // Public bits() detaches the temporary QImage before exposing mutable pixels.
-   const pixels=bits(image),owned=image.add(16).readPointer();
-   if(pixels.isNull()||owned.add(72).readS64().toNumber()!==288)throw Error('Unexpected detached image stride');
-   pixels.writeByteArray(frameTiles[key]);
-  }else if(frameColors){const c=frameColors[key];fill(image,(0xff000000|(c[0]<<16)|(c[1]<<8)|c[2])>>>0);}
-  paints++;paintedKeys.add(key);
+  paintTile(image,key,frame);
  }catch(e){fail(e);}
 }});
 function lease(ms){if(!Number.isInteger(ms)||ms<500||ms>10000)throw Error('lease_ms must be500..10000');const now=Date.now();pacing.input(dirty,now);deadline=now+ms;armed=true;dirty=true;restore=false;}
 function stop(){armed=false;dirty=false;restore=target!==null&&!errors;colors=null;tiles=null;return {stopped:true,restorationPending:restore};}
 rpc.exports={
  layout,
- status(){return {ready:!!target,armed,restorationPending:restore,errors,compositions,paints,paintedKeys:[...paintedKeys],queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
+ status(){return {ready:!!target,armed,restorationPending:restore,errors,compositions,paints,paintedKeys:[...paintedKeys],lastFrameCoverage,queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
  configure(options){return pacing.configure(options);},
  setcolors(value,ms){if(!Array.isArray(value)||value.length!==15||value.some(c=>!Array.isArray(c)||c.length!==3||c.some(v=>!Number.isInteger(v)||v<0||v>255)))throw Error('Expected15 RGB triplets');if(errors)throw Error('Native bridge faulted');colors=value.map(c=>c.slice());tiles=null;lease(ms);return {accepted:true};},
  setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('Expected311040 BGRA bytes');if(errors)throw Error('Native bridge faulted');const bytes=new Uint8Array(data);for(let i=3;i<bytes.length;i+=4)if(bytes[i]!==255)throw Error('Only opaque BGRA accepted');tiles=Array.from({length:15},(_,i)=>data.slice(i*20736,(i+1)*20736));colors=null;lease(ms);return {accepted:true};},

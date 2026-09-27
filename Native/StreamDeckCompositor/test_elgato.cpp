@@ -43,6 +43,11 @@ int main(int argc,char** argv)
         evidence["after"]=native.Request("/health",{});evidence["submitted"]=frames;
         if(evidence["after"].value("errors",0)!=0 || evidence["after"].value("paints",0)<=before.value("paints",0))
             throw std::runtime_error("Frames accepted but no native painting confirmed");
+        const auto coverage=evidence["after"].value("lastFrameCoverage",nlohmann::json::object());
+        if(coverage.value("restore",true) || coverage.value("rendered",0)!=15 || coverage.value("injected",0)!=15 ||
+           coverage.value("empty",0)+coverage.value("actions",0)!=15 ||
+           evidence["after"].value("acknowledged",0)<=before.value("acknowledged",0))
+            throw std::runtime_error("Latest native frame did not cover all 15 cells");
         native.Request("/stop",{});const auto error=native.Close();
         evidence["restored"]=error.empty();evidence["closeError"]=error;evidence["ok"]=error.empty();
         std::cout<<evidence.dump()<<std::endl;return error.empty()?0:1;

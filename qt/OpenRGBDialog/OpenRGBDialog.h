@@ -10,6 +10,7 @@
 #pragma once
 
 #include <string>
+#include <memory>
 #include <QMainWindow>
 #include <QTimer>
 #include <QSystemTrayIcon>
@@ -28,6 +29,7 @@
 
 #include "PluginManager.h"
 #include "SuspendResume.h"
+#include "../LastSessionCheckpoint.h"
 
 #include "i2c_smbus.h"
 #include "LogManager.h"
@@ -97,6 +99,12 @@ private:
     bool                            force_compact_tabs  = false;
     bool                            ShowI2CTools        = false;
     bool                            plugins_loaded      = false;
+    bool                            session_initialized = false;
+    bool                            session_suspended   = false;
+    bool                            session_closing     = false;
+    bool                            session_detecting   = true;
+    QTimer*                         session_timer       = nullptr;
+    std::unique_ptr<LastSessionCheckpoint> session_checkpoint;
 
     /*-----------------------------------------------------*\
     | Hidden pages                                          |
@@ -147,6 +155,9 @@ private:
     void closeEvent(QCloseEvent *event) override;
     bool SelectConfigProfile(const std::string name);
     void MigrateLegacySettings();
+    bool RememberLastSessionEnabled() const;
+    bool RestoreLastSession();
+    void CaptureLastSession();
 
     void SetDetectionViewState(bool detection_showing);
     void SaveProfile();

@@ -1,0 +1,10 @@
+QT += widgets
+CONFIG += console c++17
+CONFIG -= app_bundle debug_and_release
+TEMPLATE = app
+TARGET = settings_ui_test
+ROOT = ../..
+INCLUDEPATH += stubs $$ROOT/dependencies/json $$ROOT $$ROOT/qt/OpenRGBSettingsPage $$ROOT/qt/OpenRGBDynamicSettingsWidget
+SOURCES += settings_ui_test.cpp $$ROOT/qt/OpenRGBSettingsPage/OpenRGBSettingsPage.cpp $$ROOT/qt/OpenRGBDynamicSettingsWidget/OpenRGBDynamicSettingsWidget.cpp $$ROOT/JsonUtils.cpp
+HEADERS += $$ROOT/qt/OpenRGBSettingsPage/OpenRGBSettingsPage.h $$ROOT/qt/OpenRGBDynamicSettingsWidget/OpenRGBDynamicSettingsWidget.h
+FORMS += $$ROOT/qt/OpenRGBSettingsPage/OpenRGBSettingsPage.ui

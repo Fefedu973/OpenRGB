@@ -55,6 +55,10 @@ ProfileManager::ProfileManager(const filesystem::path& config_dir)
     SettingsManager*    settings_manager                                        = ResourceManager::get()->GetSettingsManager();
     json                profilemanager_settings_schema;
 
+    profilemanager_settings_schema["remember_last_session"]["title"]           = QT_TRANSLATE_NOOP("Settings", "Remember Last Session");
+    profilemanager_settings_schema["remember_last_session"]["type"]            = "bool";
+    profilemanager_settings_schema["remember_last_session"]["description"]     = QT_TRANSLATE_NOOP("Settings", "Restore the last plugin effects and layout selection on GUI startup. Presets and device configuration are not overwritten.");
+
     profilemanager_settings_schema["exit_profile"]["title"]                     = QT_TRANSLATE_NOOP("Settings", "Load Profile on Exit");
     profilemanager_settings_schema["exit_profile"]["type"]                      = "profile";
     profilemanager_settings_schema["exit_profile"]["description"]               = QT_TRANSLATE_NOOP("Settings", "Profile to load when OpenRGB exits");
@@ -87,6 +91,12 @@ ProfileManager::ProfileManager(const filesystem::path& config_dir)
     \*-----------------------------------------------------*/
     json                profilemanager_settings             = settings_manager->GetSettings("ProfileManager");
     bool                new_settings_keys                   = false;
+
+    if(!profilemanager_settings.contains("remember_last_session"))
+    {
+        profilemanager_settings["remember_last_session"] = false;
+        new_settings_keys = true;
+    }
 
     if(!profilemanager_settings.contains("open_profile"))
     {
@@ -175,6 +185,33 @@ void ProfileManager::ApplyActiveProfilePluginData()
         LOG_DEBUG("[%s] Reading active profile for plugin data: %s", PROFILEMANAGER, active_profile.c_str());
 
         OnProfileLoaded(ResourceManager::get()->GetLocalClient()->ProfileManager_DownloadProfile(active_profile));
+    }
+}
+
+bool ProfileManager::ApplyPluginSession(const nlohmann::json& plugins, const std::string& source_profile)
+{
+    PluginManagerInterface* manager = ResourceManager::get()->GetPluginManager();
+    if(!manager || !plugins.is_object() || plugins.empty()) return false;
+    ProfileLoadState::Scope loading(load_state);
+    try
+    {
+        manager->OnProfileAboutToLoad();
+        SignalProfileManagerUpdate(PROFILEMANAGER_UPDATE_REASON_PROFILE_ABOUT_TO_LOAD);
+        manager->OnProfileLoad(plugins);
+
+        // Keep the source preset as provenance when it still exists. Never add
+        // a synthetic preset, nor load its controller colors or configuration.
+        const bool known = std::find(profile_list.begin(), profile_list.end(), source_profile) != profile_list.end();
+        SetActiveProfile(known ? source_profile : "");
+        return true;
+    }
+    catch(const std::exception& error)
+    {
+        LOG_WARNING("[%s] Last session could not be restored: %s", PROFILEMANAGER, error.what());
+        // Plugins with an absent/old payload use this completion notification
+        // to resume their previous map. The caller may then load open_profile.
+        SignalProfileManagerUpdate(PROFILEMANAGER_UPDATE_REASON_ACTIVE_PROFILE_CHANGED);
+        return false;
     }
 }
 
@@ -486,6 +523,7 @@ bool ProfileManager::LoadProfile(std::string profile_name)
 
 void ProfileManager::OnProfileAboutToLoad()
 {
+    load_state.BeginRemote();
     /*-------------------------------------------------*\
     | Signal to plugins that a profile is about to load |
     \*-------------------------------------------------*/
@@ -501,6 +539,11 @@ void ProfileManager::OnProfileAboutToLoad()
 
 void ProfileManager::OnProfileLoaded(std::string profile_json_string)
 {
+    struct FinishRemote
+    {
+        ProfileLoadState& state;
+        ~FinishRemote() { state.EndRemote(); }
+    } finish{load_state};
     nlohmann::json profile_json;
     JsonUtils::JsonParse(profile_json_string, profile_json);
 
@@ -1569,6 +1612,7 @@ bool ProfileManager::LoadProfileWithOptions
     bool            load_state
     )
 {
+    ProfileLoadState::Scope loading(this->load_state);
     /*-------------------------------------------------*\
     | Get JSON data for given profile name              |
     \*-------------------------------------------------*/
@@ -1630,6 +1674,8 @@ bool ProfileManager::LoadProfileWithOptions
     {
         plugin_manager->OnProfileAboutToLoad();
     }
+
+    SignalProfileManagerUpdate(PROFILEMANAGER_UPDATE_REASON_PROFILE_ABOUT_TO_LOAD);
 
     NetworkServer* server = ResourceManager::get()->GetServer();
 

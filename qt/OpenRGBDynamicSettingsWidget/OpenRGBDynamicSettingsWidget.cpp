@@ -6,6 +6,8 @@
 #include <QGroupBox>
 #include <QLineEdit>
 #include <QSpinBox>
+#include <QSignalBlocker>
+#include <QThread>
 #include <QToolTip>
 #include <QTranslator>
 #include <QVBoxLayout>
@@ -195,7 +197,7 @@ OpenRGBDynamicSettingsWidget::OpenRGBDynamicSettingsWidget(std::string key, nloh
 
                 ((QCheckBox*)left_widget)->setChecked(enabled_value);
                 ((QComboBox*)right_widget)->setEnabled(enabled_value);
-                ((QComboBox*)right_widget)->setCurrentText(QString::fromStdString(name_value));
+                ((QComboBox*)right_widget)->setCurrentIndex(((QComboBox*)right_widget)->findText(QString::fromStdString(name_value)));
 
 #if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
                 QObject::connect((QCheckBox*)left_widget, &QCheckBox::checkStateChanged, this, &OpenRGBDynamicSettingsWidget::OnSettingChanged);
@@ -408,8 +410,17 @@ void OpenRGBDynamicSettingsWidget::changeEvent(QEvent *event)
 
 void OpenRGBDynamicSettingsWidget::ProfileListUpdated()
 {
+    if(QThread::currentThread() != thread())
+    {
+        QMetaObject::invokeMethod(this, [this] { ProfileListUpdated(); }, Qt::QueuedConnection);
+        return;
+    }
+
     if(type == "profile")
     {
+        // List maintenance is not a user edit. clear()/addItem() emit selection
+        // changes that otherwise persist an empty or unrelated startup profile.
+        const QSignalBlocker blocker(right_widget);
         std::string                 name_value      = ((QComboBox*)right_widget)->currentText().toStdString();
         std::vector<std::string>    profile_list    = ResourceManager::get()->GetProfileManager()->GetProfileList();
 
@@ -421,7 +432,7 @@ void OpenRGBDynamicSettingsWidget::ProfileListUpdated()
             ((QComboBox*)right_widget)->addItem(QString::fromStdString(profile_str));
         }
 
-        ((QComboBox*)right_widget)->setCurrentText(QString::fromStdString(name_value));
+        ((QComboBox*)right_widget)->setCurrentIndex(((QComboBox*)right_widget)->findText(QString::fromStdString(name_value)));
     }
 }
 

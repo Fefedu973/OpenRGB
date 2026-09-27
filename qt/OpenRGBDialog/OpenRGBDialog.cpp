@@ -493,6 +493,13 @@ OpenRGBDialog::OpenRGBDialog(QWidget *parent) : QMainWindow(parent), ui(new Ui::
     \*-----------------------------------------------------*/
     connect(qApp, &QCoreApplication::aboutToQuit, this, &OpenRGBDialog::handleAboutToQuit);
 
+    const auto checkpoint_path = ResourceManager::get()->GetConfigurationDirectory() / "last-session.json";
+    session_checkpoint.reset(new LastSessionCheckpoint(QString::fromStdString(checkpoint_path.u8string())));
+    session_timer = new QTimer(this);
+    session_timer->setInterval(2000);
+    connect(session_timer, &QTimer::timeout, this, &OpenRGBDialog::CaptureLastSession);
+    session_timer->start();
+
     /*-----------------------------------------------------*\
     | Handle the condition where detection ended before we  |
     | finished initializing/registering detection callback  |
@@ -604,6 +611,16 @@ void OpenRGBDialog::closeEvent(QCloseEvent *event)
     }
     else
     {
+        if(session_closing)
+        {
+            event->accept();
+            return;
+        }
+        // Capture while plugins and their GUI still exist, before an exit
+        // preset changes them. aboutToQuit can call closeEvent a second time.
+        CaptureLastSession();
+        session_closing = true;
+        session_timer->stop();
         /*-------------------------------------------------*\
         | Stop receiving resource manager callbacks before  |
         | the event loop dies: plugin teardown signals from |
@@ -1503,6 +1520,8 @@ void OpenRGBDialog::UpdateProfileList()
 
 void OpenRGBDialog::OnSuspend()
 {
+    CaptureLastSession();
+    session_suspended = true;
     if(ResourceManager::get()->GetProfileManager()->LoadAutoProfileSuspend())
     {
         plugin_manager->UnloadPlugins();
@@ -1513,6 +1532,7 @@ void OpenRGBDialog::OnResume()
 {
     plugin_manager->LoadPlugins();
     ResourceManager::get()->GetProfileManager()->LoadAutoProfileResume();
+    session_suspended = false;
 }
 
 void OpenRGBDialog::on_Exit()
@@ -1596,6 +1616,7 @@ void OpenRGBDialog::onDetectionProgressUpdated()
 
 void OpenRGBDialog::onDetectionStarted()
 {
+    session_detecting = true;
     /*-----------------------------------------------------*\
     | Hide devices view on rescan so it stops handling      |
     | paint events.                                         |
@@ -1651,7 +1672,17 @@ void OpenRGBDialog::onDetectionEnded()
     /*-----------------------------------------------------*\
     | Load the on open automatic profile                    |
     \*-----------------------------------------------------*/
-    bool open_profile_loaded = ResourceManager::get()->GetProfileManager()->LoadAutoProfileOpen();
+    bool open_profile_loaded = false;
+    if(!session_initialized)
+    {
+        // Mark before plugin hooks: registration can dispatch nested GUI events.
+        session_initialized = true;
+        open_profile_loaded = RestoreLastSession();
+        if(!open_profile_loaded)
+        {
+            open_profile_loaded = ResourceManager::get()->GetProfileManager()->LoadAutoProfileOpen();
+        }
+    }
 
     /*-----------------------------------------------------*\
     | With no profile to open, the plugins that were just   |
@@ -1660,6 +1691,43 @@ void OpenRGBDialog::onDetectionEnded()
     if(plugins_just_loaded && !open_profile_loaded)
     {
         ResourceManager::get()->GetProfileManager()->ApplyActiveProfilePluginData();
+    }
+    session_detecting = false;
+}
+
+bool OpenRGBDialog::RememberLastSessionEnabled() const
+{
+    const auto settings = ResourceManager::get()->GetSettingsManager()->GetSettings("ProfileManager");
+    return settings.contains("remember_last_session") && settings["remember_last_session"].is_boolean() &&
+           settings["remember_last_session"].get<bool>();
+}
+
+bool OpenRGBDialog::RestoreLastSession()
+{
+    if(!RememberLastSessionEnabled() || !session_checkpoint) return false;
+    nlohmann::json state;
+    if(!session_checkpoint->Read(state)) return false;
+    const bool restored = ResourceManager::get()->GetProfileManager()->ApplyPluginSession(
+        state["plugins"], state["source_profile"].get<std::string>());
+    if(restored) LOG_INFO("[%s] Restored last plugin session", context);
+    return restored;
+}
+
+void OpenRGBDialog::CaptureLastSession()
+{
+    // All plugin UI serialization runs on the GUI thread. A load begun on an
+    // SDK worker is also guarded by ProfileManager's atomic load generation.
+    if(!session_checkpoint || !RememberLastSessionEnabled() || !plugins_loaded ||
+       !session_initialized || session_suspended || session_closing || session_detecting) return;
+    auto* profiles = ResourceManager::get()->GetProfileManager();
+    try
+    {
+        session_checkpoint->Capture(true, profiles->GetLoadState(),
+            [this] { return plugin_manager->OnProfileSave(); }, profiles->GetActiveProfile());
+    }
+    catch(const std::exception& error)
+    {
+        LOG_WARNING("[%s] Last session checkpoint skipped: %s", context, error.what());
     }
 }
 

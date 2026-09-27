@@ -12,6 +12,7 @@
 #include <QGroupBox>
 #include <QLayoutItem>
 #include <QSpacerItem>
+#include <QThread>
 #include <QVBoxLayout>
 #include "JsonUtils.h"
 #include "OpenRGBDynamicSettingsWidget.h"
@@ -67,6 +68,15 @@ void OpenRGBSettingsPage::OnSettingChanged(std::string key, nlohmann::json setti
 
 void OpenRGBSettingsPage::UpdateInterface()
 {
+    // Device detection can register schemas from a worker. Rebuilding widgets
+    // there deletes the old page but cannot parent the replacements to its GUI
+    // layout. Queue onto the owning thread; Qt drops the call if we are deleted.
+    if(QThread::currentThread() != thread())
+    {
+        QMetaObject::invokeMethod(this, [this] { UpdateInterface(); }, Qt::QueuedConnection);
+        return;
+    }
+
     /*-----------------------------------------------------*\
     | Type to track ordering                                |
     \*-----------------------------------------------------*/

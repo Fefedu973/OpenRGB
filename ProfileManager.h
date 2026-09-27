@@ -13,6 +13,7 @@
 
 #include "RGBController.h"
 #include "filesystem.h"
+#include "ProfileLoadState.h"
 
 /*---------------------------------------------------------*\
 | Callback Types                                            |
@@ -79,6 +80,8 @@ public:
     ~ProfileManager();
 
     void                        ApplyActiveProfilePluginData();
+    bool                        ApplyPluginSession(const nlohmann::json& plugins, const std::string& source_profile);
+    const ProfileLoadState&      GetLoadState() const { return load_state; }
 
     void                        ClearActiveProfile();
 
@@ -142,6 +145,7 @@ public:
     void                        UpdateProfileList();
 
 private:
+    ProfileLoadState             load_state;
     /*-----------------------------------------------------*\
     | List of available profiles                            |
     \*-----------------------------------------------------*/

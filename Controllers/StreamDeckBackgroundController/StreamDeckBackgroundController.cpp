@@ -228,7 +228,47 @@ std::string EncodeNativeTiles(const room_image::Frame& frame,const room_image::M
     return tiles;
 }
 
-Controller::Controller(const Options& config, Reporter logger) : options(config), reporter(std::move(logger))
+nlohmann::json AggregateCompositorStatus(const nlohmann::json& value)
+{
+    json result=json::object();
+    if(!value.is_object()) return result;
+    const auto copy_scalar=[](const json& source,json& destination,const char* key)
+    {
+        const auto item=source.find(key);
+        if(item!=source.end() && (item->is_number() || item->is_boolean() || item->is_null())) destination[key]=*item;
+    };
+    for(const char* key:{"ready","armed","restorationPending","errors","compositions","paints","queued","acknowledged","restores","rejectedCandidates","pending","uptimeMs"}) copy_scalar(value,result,key);
+    if(value.contains("lastFrameCoverage") && value["lastFrameCoverage"].is_object())
+        for(const char* key:{"sequence","restore","rendered","injected","empty","actions"}) copy_scalar(value["lastFrameCoverage"],result["lastFrameCoverage"],key);
+    if(value.contains("pacing") && value["pacing"].is_object())
+    {
+        for(const char* key:{"maxFps","dispatchIntervalMs","windowSeconds","received","coalesced","queuedFps5s","ackFps5s"}) copy_scalar(value["pacing"],result["pacing"],key);
+        for(const char* name:{"ackLatencyMs","inputToAckMs"})
+            if(value["pacing"].contains(name) && value["pacing"][name].is_object())
+                for(const char* key:{"samples","mean","p50","p95","max"}) copy_scalar(value["pacing"][name],result["pacing"][name],key);
+    }
+    if(value.contains("lastFault") && value["lastFault"].is_object() && value["lastFault"].contains("message") && value["lastFault"]["message"].is_string())
+        result["fault"]=value["lastFault"]["message"].get<std::string>().substr(0,512);
+    return result;
+}
+
+void Controller::UpdateCompositorStatus(const nlohmann::json& value)
+{
+    auto aggregate=AggregateCompositorStatus(value);
+    if(aggregate.empty()) return;
+    aggregate["sampledSteadyMs"]=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+    Status snapshot;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        status.compositor=std::move(aggregate);
+        snapshot=status;
+    }
+    // No transport mutex across the controller's metadata/AccessMutex callback.
+    if(status_reporter) status_reporter(snapshot);
+}
+
+Controller::Controller(const Options& config, Reporter logger, StatusReporter status_callback)
+    : options(config), reporter(std::move(logger)), status_reporter(std::move(status_callback))
 {
     if(options.fps < 1 || options.fps > 20) throw std::runtime_error("Invalid Stream Deck frame rate");
     if(!options.surface_channel.empty() && (!room_surface::ValidChannel(options.surface_channel)
@@ -320,6 +360,7 @@ void Controller::Run()
     std::uint64_t sent_generation = 0;
     auto last_sent = Clock::time_point::min();
     auto next_attempt = Clock::now();
+    auto next_diagnostics = Clock::time_point::min();
     const auto interval = std::chrono::milliseconds((1000 + options.fps - 1) / options.fps);
     struct Pending
     {
@@ -391,6 +432,7 @@ void Controller::Run()
             {
                 ready = false;
                 const auto health = Request(session, "GET", "/health");
+                if(session.native) { UpdateCompositorStatus(health); next_diagnostics=Clock::now()+std::chrono::seconds(2); }
                 if(!health.contains("ready") || health["ready"] != true) throw std::runtime_error("Waiting for native Stream Deck target");
                 {
                     std::lock_guard<std::mutex> lock(mutex);
@@ -399,6 +441,11 @@ void Controller::Run()
                 layout = ParseLayout(Request(session, "GET", "/layout"));
                 ready_session = session;
                 ready = true;
+            }
+            if(session.native && Clock::now()>=next_diagnostics)
+            {
+                next_diagnostics=Clock::now()+std::chrono::seconds(2);
+                UpdateCompositorStatus(Request(session,"GET","/health"));
             }
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -441,6 +488,7 @@ void Controller::Run()
         {
             ready = false;
             Failure(error.what());
+            if(native) UpdateCompositorStatus(native->LastDiagnostics());
             next_attempt = Clock::now() + std::chrono::seconds(1);
         }
     }
@@ -461,6 +509,7 @@ void Controller::RunSurface()
     std::uint64_t sent_sequence=0, sent_generation=0;
     auto last_sent=Clock::time_point::min();
     auto next_attempt=Clock::now();
+    auto next_diagnostics=Clock::time_point::min();
     const auto interval=std::chrono::milliseconds((1000+options.fps-1)/options.fps);
     const auto stopped=[&]() { std::lock_guard<std::mutex> lock(mutex);return stopping; };
     const auto release=[&]()
@@ -517,11 +566,17 @@ void Controller::RunSurface()
                 ready=false;
                 { std::lock_guard<std::mutex> lock(mutex);status.state="connecting"; }
                 const auto health=Request(session,"GET","/health");
+                if(session.native) { UpdateCompositorStatus(health); next_diagnostics=Clock::now()+std::chrono::seconds(2); }
                 if(!health.contains("ready") || health["ready"]!=true)
                     throw std::runtime_error("Waiting for native Stream Deck target");
                 if(stopped()) break;
                 layout=ParseLayout(Request(session,"GET","/layout"));
                 ready_session=session;ready=true;
+            }
+            if(session.native && Clock::now()>=next_diagnostics)
+            {
+                next_diagnostics=Clock::now()+std::chrono::seconds(2);
+                UpdateCompositorStatus(Request(session,"GET","/health"));
             }
             if(stopped()) break;
             // Refresh after HTTP handshake: it may have consumed the frame's whole TTL.
@@ -542,6 +597,7 @@ void Controller::RunSurface()
         catch(const std::exception& error)
         {
             ready=false;Failure(error.what());next_attempt=Clock::now()+std::chrono::seconds(1);
+            if(native) UpdateCompositorStatus(native->LastDiagnostics());
         }
     }
     release();

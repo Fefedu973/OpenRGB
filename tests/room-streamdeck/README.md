@@ -40,6 +40,8 @@ En transport `bridge`, le pont doit être démarré par son lanceur existant. En
 
 ## Cadence et arrêt
 
+Le transport natif rafraîchit aussi un diagnostic agrégé toutes les deux secondes sur son worker existant. Le SDK expose ce cache dans `configuration.configuration.runtime` du contrôleur : compteurs acceptés/rendus, couverture de la dernière trame, cadence et erreur bornée. `sampledSteadyMs` permet de voir si le cache a vieilli. Une lecture SDK n'appelle jamais Frida et ne copie aucune image. Les compteurs de composition ne constituent pas une preuve que les cases vides sont visibles sur l'écran physique ; cette régression reste en cours de diagnostic après le signalement utilisateur du 27 septembre.
+
 Le worker garde une seule image, remplacée par la plus récente. Il n'effectue aucune requête HTTP tant qu'une image valide n'est pas disponible. Le plafond configuré est de 1 à 20 envois/s, 20 par défaut ; les délais d'encodage et de réseau peuvent réduire le débit réel. Une image fixe renouvelle le bail toutes les 500 ms, ou toutes les 1000 ms si le plafond choisi est de 1 image/s. En mode surface, le producteur doit republier son image avant expiration du TTL, y compris si elle est fixe. Les erreurs imposent une seconde d'attente et ne créent pas une file de trames.
 
 Chaque POST demande un bail de 2000 ms. L'arrêt demande `/stop` pour revenir au rendu normal, après terminaison de la requête en cours. Cette réponse confirme une demande, pas une mesure de restauration optique. Si l'API est absente ou le token a changé, l'expiration du bail fournit le repli. Une erreur native du pont peut encore nécessiter un rendu naturel ou une relance propre, conformément à ses notes existantes.

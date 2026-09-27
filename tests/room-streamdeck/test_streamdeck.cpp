@@ -456,6 +456,15 @@ int main()
 {
     try
     {
+        const auto aggregate=AggregateCompositorStatus({{"ready",true},{"paints",150},{"tiles",std::string(10000,'x')},
+            {"lastFrameCoverage",{{"rendered",15},{"empty",7},{"injected",15},{"pixels","excluded"}}},
+            {"pacing",{{"ackFps5s",17.2},{"ackLatencyMs",{{"p95",2},{"image","excluded"}}}}},
+            {"lastFault",{{"message",std::string(2000,'e')},{"stack","excluded"}}}});
+        Check(aggregate.at("ready")==true && aggregate.at("paints")==150,"Aggregate counters missing");
+        Check(!aggregate.contains("tiles") && !aggregate["lastFrameCoverage"].contains("pixels"),"Pixel data escaped into metadata");
+        Check(aggregate["pacing"]["ackLatencyMs"].size()==1 && aggregate.at("fault").get<std::string>().size()==512,"Unbounded diagnostic field");
+        Check(AggregateCompositorStatus(json::array()).empty(),"Old/invalid status must remain compatible");
+        std::cout << "PASS bounded aggregate compositor metadata without images\n";
         TestOptionsAndImage();std::cout << "PASS configuration, native layout, BGRA and spatial gradients\n";
         TestCoalescingAndLease();std::cout << "PASS real mock HTTP, coalescing, pacing, lease and stop\n";
         TestRotationAndRefusal();std::cout << "PASS geometry refusal and session rotation\n";

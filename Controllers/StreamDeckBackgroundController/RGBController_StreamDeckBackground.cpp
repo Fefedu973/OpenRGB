@@ -16,7 +16,18 @@
 
 RGBController_StreamDeckBackground::RGBController_StreamDeckBackground(const streamdeck_background::Options& options)
     : surface_input(!options.surface_channel.empty()),
-      controller(options, [](const std::string& reason){ LOG_WARNING("[Stream Deck Background] %s", reason.c_str()); })
+      controller(options, [](const std::string& reason){ LOG_WARNING("[Stream Deck Background] %s", reason.c_str()); },
+      [this](const streamdeck_background::Status& status)
+      {
+          // SDK metadata reads this cache only. No RPC, image copy or lock held
+          // by the transport while publishing; no editable configuration field.
+          const auto value=nlohmann::json{{"schema",nlohmann::json::object()},
+              {"configuration",{{"runtime",{{"state",status.state},{"input",status.input},
+                  {"submitted",status.submitted},{"accepted",status.accepted},{"failures",status.failures},
+                  {"compositor",status.compositor}}}}}}.dump();
+          std::unique_lock<std::shared_mutex> lock(AccessMutex);
+          configuration=value;
+      })
 {
     name = "Stream Deck Background Canvas";
     vendor = options.transport=="native" ? "Elgato / native in-process compositor" : "Elgato / local compositor bridge";

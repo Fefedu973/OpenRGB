@@ -56,13 +56,17 @@ struct Status
     std::uint32_t surface_width = 0, surface_height = 0;
     std::string input = "none";
     bool stop_requested = false;
+    nlohmann::json compositor; // Bounded aggregate diagnostics, never frame pixels.
 };
+
+nlohmann::json AggregateCompositorStatus(const nlohmann::json& value);
 
 class Controller : public room_image::RGBControllerImageInterface
 {
 public:
     using Reporter = std::function<void(const std::string&)>;
-    explicit Controller(const Options& options, Reporter reporter = {});
+    using StatusReporter = std::function<void(const Status&)>;
+    explicit Controller(const Options& options, Reporter reporter = {}, StatusReporter status_reporter = {});
     ~Controller();
     Controller(const Controller&) = delete;
     Controller& operator=(const Controller&) = delete;
@@ -80,9 +84,11 @@ private:
     void Run();
     void RunSurface();
     void Failure(const std::string& reason);
+    void UpdateCompositorStatus(const nlohmann::json& value);
 
     Options options;
     Reporter reporter;
+    StatusReporter status_reporter;
     mutable std::mutex mutex;
     std::condition_variable changed;
     std::vector<unsigned char> latest;

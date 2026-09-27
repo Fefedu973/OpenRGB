@@ -3,6 +3,7 @@
 #include <fstream>
 #include <iostream>
 #include <set>
+#include <thread>
 #include <nlohmann/json.hpp>
 #include "AlienwareMonitorController.h"
 #include "StringUtils.h"
@@ -12,6 +13,7 @@ using namespace AlienwareMonitor;
 /* These are link-time HID stubs. The test binary cannot open a USB device. */
 struct hid_device_
 {
+    std::mutex mutex;
     std::vector<std::vector<unsigned char>> writes;
     int read_length = 193;
     bool short_write = false;
@@ -24,6 +26,7 @@ struct hid_device_
 
 extern "C" int HID_API_CALL hid_write(hid_device* dev, const unsigned char* data, size_t length)
 {
+    std::lock_guard<std::mutex> lock(dev->mutex);
     dev->writes.emplace_back(data, data + length);
     if(dev->short_write) return static_cast<int>(length) - 1;
     if(length == 193 && data[2] == 0xE1 && data[3] == 2)
@@ -37,6 +40,7 @@ extern "C" int HID_API_CALL hid_write(hid_device* dev, const unsigned char* data
 }
 extern "C" int HID_API_CALL hid_get_input_report(hid_device* dev, unsigned char* data, size_t length)
 {
+    std::lock_guard<std::mutex> lock(dev->mutex);
     ++dev->reads;
     assert(length == 193 && data[0] == 0);
     std::copy(dev->token.begin(), dev->token.end(), data + 1);
@@ -178,11 +182,96 @@ static void TransportFailuresAndIsolation()
     assert(modern.Initialize() && h.writes.size() == 1 && h.writes[0][8] == 0xF4);
 }
 
+static void LatestFrameScheduling()
+{
+    using namespace std::chrono;
+    using Color = AlienwareMonitorController::Color;
+    Profile profile = *FindProfile(0x187C, 0x101D);
+    profile.delay_ms = 100;
+    hid_device_ device;
+    auto snapshot = [&]() {
+        std::lock_guard<std::mutex> lock(device.mutex);
+        return device.writes;
+    };
+    auto await_count = [&](size_t count) {
+        const auto end = steady_clock::now() + seconds(3);
+        while(snapshot().size() < count && steady_clock::now() < end)
+            std::this_thread::sleep_for(milliseconds(2));
+        assert(snapshot().size() >= count);
+    };
+    const Color red{{200, 0, 0}}, blue{{0, 0, 200}}, green{{0, 200, 0}};
+    auto stopped = steady_clock::now();
+    {
+        AlienwareMonitorController controller(&device, "worker-mock", profile);
+        assert(controller.Initialize());
+        const auto begin = steady_clock::now();
+        for(unsigned frame = 0; frame < 10000; ++frame)
+            controller.SubmitColors({Color{{static_cast<unsigned char>(frame), 3, 4}}, blue});
+        controller.SubmitColors({red, blue});
+        assert(steady_clock::now() - begin < milliseconds(80));
+        await_count(2);
+        auto writes = snapshot();
+        assert(writes[0] == ColorReport(profile.transport, 1, 200, 0, 0));
+        assert(writes[1] == ColorReport(profile.transport, 8, 0, 0, 200));
+        for(unsigned i = 0; i < 200; ++i) controller.SubmitColors({red, blue});
+        std::this_thread::sleep_for(milliseconds(150));
+        assert(snapshot().size() == 2); // repeated render notifications do not cause redundant I/O
+        controller.SubmitColors({green, green});
+        await_count(3);
+        assert(snapshot()[2] == ColorReport(profile.transport, 9, 0, 200, 0));
+        controller.SubmitColors({red, blue});
+        controller.SubmitColors({blue, red});
+        await_count(5);
+        writes = snapshot();
+        assert(writes[3] == ColorReport(profile.transport, 8, 200, 0, 0));
+        assert(writes[4] == ColorReport(profile.transport, 1, 0, 0, 200));
+        stopped = steady_clock::now();
+    }
+    assert(steady_clock::now() - stopped < milliseconds(80)); // idle wait is interruptible
+    std::cout << "Latest mailbox, nonblocking burst, per-zone fairness, grouped masks, dedup and stop: PASS\n";
+}
+
+static void DumpParity()
+{
+    nlohmann::json result;
+    result["profiles"] = nlohmann::json::array();
+    for(const auto& p : Profiles())
+    {
+        nlohmann::json item = {{"vid",p.vid},{"pid",p.pid},{"name",p.name},
+            {"protocol",p.transport == Transport::Legacy ? "legacy" : p.transport == Transport::Microchip ? "microchip" : "realtek"},
+            {"auth",p.authentication},{"interval",p.delay_ms},{"all",p.AllZones()}};
+        item["zones"] = nlohmann::json::array();
+        std::set<unsigned char> masks{p.AllZones()};
+        for(const auto& z : p.zones) {item["zones"].push_back({{"mask",z.mask}}); masks.insert(z.mask);}
+        item["reports"] = nlohmann::json::array();
+        for(auto mask : masks)
+            for(unsigned int i=0;i<32;++i)
+            {
+                unsigned char r = static_cast<unsigned char>(i*47), g = static_cast<unsigned char>(i*127), b = static_cast<unsigned char>(i*255);
+                item["reports"].push_back({{"mask",mask},{"rgb",{r,g,b}}, {"packet",ColorReport(p.transport,mask,r,g,b)}});
+            }
+        result["profiles"].push_back(item);
+    }
+    result["auth"] = nlohmann::json::array();
+    for(size_t k=0;k<OEMKeys().size();++k)
+        for(unsigned int i=0;i<64;++i)
+        {
+            std::array<unsigned char,16> token{};
+            for(unsigned int j=0;j<token.size();++j) token[j]=static_cast<unsigned char>(i*(j+1)+j*37);
+            std::array<unsigned char,8> answer{};
+            assert(GenerateKey(token.data(),token.size(),OEMKeys()[k],answer));
+            result["auth"].push_back({{"key",k},{"token",token},{"answer",answer}});
+        }
+    std::cout << result.dump();
+}
+
 int main(int argc, char** argv)
 {
     assert(argc == 2);
+    if(std::string(argv[1]) == "--dump-parity") {DumpParity(); return 0;}
     Fixtures(argv[1]);
     ProfilesAndBounds();
     TransportFailuresAndIsolation();
+    LatestFrameScheduling();
     std::cout << "Profiles, report lengths, malformed inputs, failed/partial transfers, bounded authentication, per-device key isolation: PASS\n";
 }

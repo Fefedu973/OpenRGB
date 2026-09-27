@@ -10,6 +10,7 @@
 \*---------------------------------------------------------*/
 
 #include <LogitechProtocolCommon.h>
+#include "LogitechReceiverProtocol.h"
 
 const char* logitech_led_locations[] =
 {
@@ -35,268 +36,74 @@ static std::vector<uint16_t> logitech_RGB_pages =
     LOGITECH_HIDPP_PAGE_RGB_EFFECTS2
 };
 
-int getWirelessDevice(usages device_usages, uint16_t pid, wireless_map *wireless_devices, std::map<uint8_t, bool> *online_out)
+namespace
 {
-    hid_device* dev_use1;
-    usages::iterator find_usage = device_usages.find(1);
-    if (find_usage == device_usages.end())
+struct ReceiverIO
+{
+    usages handles;
+    int Write(const uint8_t* data, size_t size) const
     {
-        LOG_INFO("Unable get_Wireless_Device due to missing FAP Short Message (0x10) usage");
-        LOG_DEBUG("Dumping device usages:");
-        for(usages::iterator dev = device_usages.begin(); dev != device_usages.end(); dev++)
-        {
-            LOG_DEBUG("Usage index:\t%i", dev->first);
-        }
+        const auto handle = handles.find(1);
+        return handle == handles.end() || !handle->second ? -1 : hid_write(handle->second, data, size);
     }
-    else
+    int Read(unsigned usage, uint8_t* data, size_t size, int timeout) const
     {
-        dev_use1 = find_usage->second;
-        /*-----------------------------------------------------------------*\
-        | Create a buffer for reads                                         |
-        \*-----------------------------------------------------------------*/
-        blankFAPmessage response;
-        response.init();
-
-        shortFAPrequest get_connected_devices;
-        get_connected_devices.init(LOGITECH_RECEIVER_DEVICE_INDEX, LOGITECH_GET_REGISTER_REQUEST);
-
-        hid_write(dev_use1, get_connected_devices.buffer, get_connected_devices.size());
-        hid_read_timeout(dev_use1, response.buffer, response.size(), LOGITECH_PROTOCOL_TIMEOUT);
-        bool wireless_notifications = response.data[1] & 1;  //Connected devices is a flag
-
-        if (!wireless_notifications)
-        {
-            response.init(); //zero out the response
-            get_connected_devices.init(LOGITECH_RECEIVER_DEVICE_INDEX, LOGITECH_SET_REGISTER_REQUEST);
-            get_connected_devices.data[1] = 1;
-            hid_write(dev_use1, get_connected_devices.buffer, get_connected_devices.size());
-            hid_read_timeout(dev_use1, response.buffer, response.size(), LOGITECH_PROTOCOL_TIMEOUT);
-
-            if(get_connected_devices.feature_index == 0x8F)
-            {
-                LOG_ERROR("Logitech Protocol error: %02X %02X %02X %02X %02X %02X %02X", get_connected_devices.report_id, get_connected_devices.device_index, get_connected_devices.feature_index, get_connected_devices.feature_command, get_connected_devices.data[0], get_connected_devices.data[1], get_connected_devices.data[2]);
-            }
-        }
-
-        response.init(); //zero out the response
-        get_connected_devices.init(LOGITECH_RECEIVER_DEVICE_INDEX, LOGITECH_GET_REGISTER_REQUEST);
-        get_connected_devices.feature_command       = 0x02;    //0x02 Connection State register. Essentially asking for count of paired devices
-        hid_write(dev_use1, get_connected_devices.buffer, get_connected_devices.size());
-        hid_read_timeout(dev_use1, response.buffer, response.size(), LOGITECH_PROTOCOL_TIMEOUT);
-
-        unsigned int device_count = response.data[1];
-        LOG_INFO("Count of connected devices to %4X: %i", pid, device_count);
-
-        if (device_count > 0)
-        {
-            LOG_INFO("Faking a reconnect to get device list");
-            device_count++;     //Add 1 to the device_count to include the receiver
-
-            response.init();
-            get_connected_devices.init(LOGITECH_RECEIVER_DEVICE_INDEX, LOGITECH_SET_REGISTER_REQUEST);
-            get_connected_devices.feature_index     = LOGITECH_SET_REGISTER_REQUEST;
-            get_connected_devices.feature_command   = 0x02;    //0x02 Connection State register
-            get_connected_devices.data[0]           = 0x02;    //Writting 0x02 to the connection state register will ask the receiver to fake a reconnect of paired devices
-            hid_write(dev_use1, get_connected_devices.buffer, get_connected_devices.size());
-
-            for(size_t i = 0; i < device_count; i++)
-            {
-                blankFAPmessage devices;
-                devices.init();
-
-                hid_read_timeout(dev_use1, devices.buffer, devices.size(), LOGITECH_PROTOCOL_TIMEOUT);
-                unsigned int wireless_PID = (devices.data[2] << 8) | devices.data[1];
-                LOG_INFO("Connected Device Index %i:\tVirtualID=%04X\t\t%02X %02X %02X %02X %02X %02X %02X", i, wireless_PID, devices.buffer[0], devices.buffer[1], devices.buffer[2], devices.buffer[3], devices.buffer[4], devices.buffer[5], devices.buffer[6]);
-
-                /*-----------------------------------------------------------------*\
-                | We need to read the receiver from the HID device queue but        |
-                |    there is no need to add it as it's own device                  |
-                \*-----------------------------------------------------------------*/
-                if(devices.device_index != LOGITECH_RECEIVER_DEVICE_INDEX)
-                {
-                    wireless_devices->emplace(wireless_PID, devices.device_index);
-
-                    /*-------------------------------------*\
-                    | data[0] bit 0x40 of the connection    |
-                    | notification is the link flag: set    |
-                    | means the device is paired but not    |
-                    | currently linked (off / asleep).      |
-                    | Record online state so callers can    |
-                    | tell a sleeping device apart from     |
-                    | an absent slot.                       |
-                    \*-------------------------------------*/
-                    if(online_out)
-                    {
-                        online_out->emplace(devices.device_index, !(devices.data[0] & 0x40));
-                    }
-                }
-            }
-        }
-        else
-        {
-            LOG_WARNING("No devices were found connected to receiver!");
-        }
+        auto handle = handles.find(static_cast<uint8_t>(usage));
+#if !defined(_WIN32)
+        // hidraw/IOHID expose both report IDs through the same interface node.
+        if(handle == handles.end()) handle = handles.find(1);
+#endif
+        return handle == handles.end() || !handle->second ? -1 : hid_read_timeout(handle->second, data, size, timeout);
     }
+    bool Query(uint8_t operation, uint8_t reg, uint8_t sub, LogitechReceiverProtocol::Report& response) const
+    {
+        return LogitechReceiverProtocol::Register(
+            [this](const uint8_t* d, size_t n) { return Write(d, n); },
+            [this](unsigned u, uint8_t* d, size_t n, int t) { return Read(u, d, n, t); },
+            operation, reg, {sub, 0, 0}, sub, response);
+    }
+};
+}
 
-    return((int)wireless_devices->size());
+int getWirelessDevice(usages device_usages, uint16_t pid, wireless_map* wireless_devices, std::map<uint8_t, bool>* online_out)
+{
+    const ReceiverIO io{device_usages};
+    const auto pairs = LogitechReceiverProtocol::Discover(
+        [&io](const uint8_t* d, size_t n) { return io.Write(d, n); },
+        [&io](unsigned u, uint8_t* d, size_t n, int t) { return io.Read(u, d, n, t); });
+    for(const auto& pair : pairs)
+    {
+        wireless_devices->emplace(pair.wpid, pair.slot);
+        if(online_out && pair.online_known) online_out->emplace(pair.slot, pair.online);
+        LOG_DEBUG("Receiver %04X verified pairing slot=%u PID=%04X (%s)", pid, pair.slot, pair.wpid,
+                  pair.online_known ? "connection event" : "stored pairing register");
+    }
+    return static_cast<int>(wireless_devices->size());
 }
 
 std::string getWirelessDeviceName(usages device_usages, uint8_t device_index)
 {
-    usages::iterator find_usage = device_usages.find(1);
-
-    if(find_usage == device_usages.end() || device_index < 1)
-    {
-        return "";
-    }
-
-    hid_device* dev_use1 = find_usage->second;
-
-    /*-----------------------------------------------------*\
-    | GET_LONG_REGISTER 0xB5 (receiver info), sub 0x40 + N  |
-    | - 1 = device name: the codename the receiver stores   |
-    | for the paired device. Answered by the receiver       |
-    | itself, so it works even when the device is asleep.   |
-    \*-----------------------------------------------------*/
-    shortFAPrequest get_name;
-    get_name.init(LOGITECH_RECEIVER_DEVICE_INDEX, LOGITECH_GET_LONG_REGISTER_REQUEST);
-    get_name.feature_command = 0xB5;
-    get_name.data[0]         = (uint8_t)(0x40 + device_index - 1);
-
-    hid_write(dev_use1, get_name.buffer, get_name.size());
-
-    /*-----------------------------------------------------*\
-    | Read until the matching response, skipping            |
-    | unrelated frames (link notifications etc.) up to      |
-    | a small budget.                                       |
-    \*-----------------------------------------------------*/
-    for(int reads = 0; reads < 8; reads++)
-    {
-        blankFAPmessage response;
-        response.init();
-
-        int rd = hid_read_timeout(dev_use1, response.buffer, response.size(), LOGITECH_PROTOCOL_TIMEOUT);
-
-        if(rd <= 0)
-        {
-            break;
-        }
-
-        if(response.feature_index   != LOGITECH_GET_LONG_REGISTER_REQUEST ||
-           response.feature_command != 0xB5                               ||
-           response.data[0]         != (uint8_t)(0x40 + device_index - 1))
-        {
-            continue;
-        }
-
-        unsigned int name_len = response.data[1];
-
-        LOG_DEBUG("Pairing name reply idx=%u len=%u raw=[%02X %02X %02X %02X %02X %02X %02X %02X]",
-                  device_index, name_len,
-                  response.data[0], response.data[1], response.data[2], response.data[3],
-                  response.data[4], response.data[5], response.data[6], response.data[7]);
-
-        if(name_len == 0 || name_len > 14)
-        {
-            break;
-        }
-
-        std::string name((char*)&response.data[2], name_len);
-
-        while(!name.empty() && (name.back() == '\0' || name.back() == ' '))
-        {
-            name.pop_back();
-        }
-
-        /*-------------------------------------------------*\
-        | Reject a garbled read: right length, junk         |
-        | bytes. Callers read an empty return as            |
-        | "no pairing name".                                |
-        \*-------------------------------------------------*/
-        for(unsigned char c : name)
-        {
-            if(c < 0x20 || c > 0x7E)
-            {
-                LOG_DEBUG("Pairing name for idx=%u is not printable, discarding", device_index);
-                return "";
-            }
-        }
-
-        return name;
-    }
-
-    return "";
+    if(device_index < 1 || device_index > 6) return "";
+    const ReceiverIO io{device_usages};
+    LogitechReceiverProtocol::Report response{};
+    if(!io.Query(0x83, 0xB5, static_cast<uint8_t>(0x40 + device_index - 1), response)) return "";
+    const unsigned length = response[5];
+    if(length == 0 || length > 14) return "";
+    std::string name(reinterpret_cast<const char*>(response.data() + 6), length);
+    while(!name.empty() && (name.back() == 0 || name.back() == ' ')) name.pop_back();
+    for(unsigned char c : name) if(c < 0x20 || c > 0x7E) return "";
+    return name;
 }
 
-/*---------------------------------------------------------*\
-| Receiver-stored serial for a paired slot:                 |
-| GET_LONG_REGISTER 0xB5 sub 0x30+N-1 (extended             |
-| pairing info), bytes 1..4, the same value the device      |
-| reports as its HID++ 2.0 unit id. Answered from the       |
-| receiver's own registers, so it works while the           |
-| device is asleep, off, or away on its cable: a            |
-| device identity that needs no reachable device.           |
-\*---------------------------------------------------------*/
 std::string getWirelessDeviceSerial(usages device_usages, uint8_t device_index)
 {
-    usages::iterator find_usage = device_usages.find(1);
-
-    if(find_usage == device_usages.end() || device_index < 1)
-    {
-        return "";
-    }
-
-    hid_device* dev_use1 = find_usage->second;
-
-    shortFAPrequest get_serial;
-    get_serial.init(LOGITECH_RECEIVER_DEVICE_INDEX, LOGITECH_GET_LONG_REGISTER_REQUEST);
-    get_serial.feature_command = 0xB5;
-    get_serial.data[0]         = (uint8_t)(0x30 + device_index - 1);
-
-    hid_write(dev_use1, get_serial.buffer, get_serial.size());
-
-    for(int reads = 0; reads < 8; reads++)
-    {
-        blankFAPmessage response;
-        response.init();
-
-        int rd = hid_read_timeout(dev_use1, response.buffer, response.size(), LOGITECH_PROTOCOL_TIMEOUT);
-
-        if(rd <= 0)
-        {
-            break;
-        }
-
-        if(response.feature_index   != LOGITECH_GET_LONG_REGISTER_REQUEST ||
-           response.feature_command != 0xB5                               ||
-           response.data[0]         != (uint8_t)(0x30 + device_index - 1))
-        {
-            continue;
-        }
-
-        char serial[9];
-
-        snprintf(serial, sizeof(serial), "%02X%02X%02X%02X",
-                 response.data[1], response.data[2], response.data[3], response.data[4]);
-
-        std::string serial_str(serial);
-
-        LOG_DEBUG("Pairing serial reply idx=%u serial=%s", device_index, serial_str.c_str());
-
-        /*-------------------------------------------------*\
-        | An all-zero serial is the receiver saying         |
-        | it has none. Useless as an identity,              |
-        | callers must not treat it as one.                 |
-        \*-------------------------------------------------*/
-        if(serial_str == "00000000")
-        {
-            return "";
-        }
-
-        return serial_str;
-    }
-
-    return "";
+    if(device_index < 1 || device_index > 6) return "";
+    const ReceiverIO io{device_usages};
+    LogitechReceiverProtocol::Report response{};
+    if(!io.Query(0x83, 0xB5, static_cast<uint8_t>(0x30 + device_index - 1), response)) return "";
+    char serial[9];
+    snprintf(serial, sizeof(serial), "%02X%02X%02X%02X", response[5], response[6], response[7], response[8]);
+    return std::string(serial) == "00000000" ? "" : std::string(serial);
 }
 
 logitech_device::logitech_device(char *path, usages _usages, uint8_t _device_index, bool _wireless)

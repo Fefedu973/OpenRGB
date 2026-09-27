@@ -45,8 +45,11 @@ DetectedControllers DetectGoveeControllers()
             | from the Govee Multicast IP, send port 4001   |
             | and receive port 4002                         |
             \*---------------------------------------------*/
-            GoveeController::broadcast_port.udp_client("239.255.255.250", "4001", "4002");
-            GoveeController::broadcast_port.udp_join_multicast_group("239.255.255.250");
+            if(!GoveeController::OpenDiscoverySocket())
+            {
+                LOG_WARNING("[Govee] Cannot open discovery socket on UDP 4002; discovery skipped");
+                return detected_controllers;
+            }
 
             /*---------------------------------------------*\
             | Start a thread to handle responses received   |
@@ -94,7 +97,9 @@ DetectedControllers DetectGoveeControllers()
             GoveeController::ReceiveThreadRun = false;
             GoveeController::ReceiveThread->join();
             delete GoveeController::ReceiveThread;
+            GoveeController::ReceiveThread = nullptr;
             GoveeController::broadcast_port.tcp_close();
+            GoveeController::broadcast_port.sock = INVALID_SOCKET;
         }
     }
 

@@ -12,9 +12,10 @@ data paths; replacing Qt with another UI framework is not required for these fix
 * KBHE RAW HID driver, restricted to the real RGB interface, with 82 physical LEDs.
 * Unified Alienware monitor driver with classic, authenticated and newer protocol
   profiles; conservative per-model update intervals, including AW3426DW.
-* Stream Deck background controller: native C++ client of the existing Elgato
-  compositor, preserving actions/icons. It accepts either an ordinary 80×50 matrix
-  or a separate full image. **The Elgato Python/Frida compositor is still required.**
+* Stream Deck background controller: full images composed behind existing icons
+  and actions. The optional in-process Frida Core transport removes the Python
+  process and HTTP bridge; the Elgato application and guarded compositor remain
+  necessary. The old bridge transport is retained as a compatibility option.
 * Govee LAN discovery matched by stable MAC, new segment profiles, HYTE zone/single
   updates and NVIDIA monochrome brightness correction.
 * Large-device UI: lazy LED list labels, bounded popup work, coalesced preview
@@ -39,8 +40,20 @@ Source coverage is **not** physical confirmation of the new C++ ports. Protocol
 fixtures, fake radios, Qt offscreen tests and loopback/shared-memory tests are
 separate from a native test against each real device. See the
 [device audit](docs/room/native-device-audit.md) and controller test READMEs.
-G502 X PLUS and G512 already have upstream HID++ implementations; they have not
-been replaced on the basis of an old OpenRGB release's behavior.
+The requested Logitech pair is **G915 and G502 X PLUS**. The current upstream
+physical-receiver isolation is retained, with an additional C547 long-report
+identity probe fix. Native read-only probing confirmed the user's G502 X PLUS
+and its eight zones; the absent G915 and simultaneous physical pair remain
+unverified. See [Logitech findings](docs/room/logitech-coexistence.md).
+
+Native tests on 27 September confirmed the **AW3426DW 187C:101D** logo and
+power-button control without authentication, and the Stream Deck background
+across all fifteen keys with icons preserved. The monitor uses a paced
+latest-frame worker, not a queue of obsolete animation frames. The installed
+SignalRGB and compiled C++ packet builders match across all 23 monitor profiles.
+KBHE firmware 2.0.10 accepted 90 full frames and restored its initial live image;
+the older hardware-effect snapshot was unavailable, so no historical effect is
+invented. See [native test procedure](tools/room-diagnostics/README.md).
 
 ## Build on Windows
 
@@ -52,6 +65,7 @@ git clone --branch room-integration https://github.com/Fefedu973/OpenRGB.git Ope
 git clone --branch room-canvas https://github.com/Fefedu973/OpenRGBEffectsPlugin.git OpenRGB-Effects-Room
 git clone --branch room-surfaces https://github.com/Fefedu973/OpenRGBVisualMapPlugin.git OpenRGB-VisualMap-Room
 git -C OpenRGB-Effects-Room submodule update --init Dependencies/QCodeEditor Dependencies/SimplexNoise
+python OpenRGB-Effects-Room/tools/fetch-webview2.py
 cd OpenRGB-Room
 .\tools\room-build\Build-Room.ps1 -QtKit C:\Qt\6.8.3\msvc2022_64 -Jom C:\Tools\jom.exe -EffectsRoot ..\OpenRGB-Effects-Room -VisualMapRoot ..\OpenRGB-VisualMap-Room -Package
 ```
@@ -62,12 +76,24 @@ No global Qt installation, firmware change or application startup is performed b
 the build script. Qt/compiler runtime files in `dist-room` are for local use;
 source publication does not imply a redistribution audit of every dependency.
 
+The Effects fork includes **Special → Web Page**: a configurable HTTP/HTTPS/local
+HTML page rendered by WebView2, routed as a full image or ordinary LED samples.
+The SDK fetch command above enables this optional build feature; the portable
+package copies its loader and license. The Microsoft WebView2 Evergreen runtime
+must already be installed. Start with an 800×600 canvas and a 20 FPS cap; actual
+throughput depends on the page and CPU image capture. See the Effects fork's
+`Documentation/WEBPAGE.md` for setup and the verified lifecycle tests.
+
 ## First native hardware test
 
+See [French startup and Web Page instructions](docs/room/DEMARRAGE.md) for the
+local candidate, ownership requirements and current validation limits.
+
 Keep the existing working setup until testing each port. Stop SignalRGB and other
-RGB hardware owners before allowing OpenRGB detection. For BLE, suspend the old
+RGB hardware owners, including any OpenRGB Windows service, before detection. For BLE, suspend the old
 Govee companion/supervisor; closing SignalRGB alone does not release that radio
-connection. Keep the Elgato application and its compositor for background mode.
+connection. Keep the Elgato application open for background mode; suspend the
+Python compositor when selecting the native in-process transport.
 
 The portable candidate uses a separate `--config` directory. It does not import or
 overwrite the normal OpenRGB profile or SignalRGB registry. The launcher checks

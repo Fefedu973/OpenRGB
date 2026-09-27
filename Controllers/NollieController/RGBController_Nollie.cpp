@@ -68,6 +68,7 @@ void RGBController_Nollie::SetupZones()
     | Clear any existing color/LED configuration            |
     \*-----------------------------------------------------*/
     leds.clear();
+    leds_channel.clear();
     colors.clear();
     zones.resize(controller->GetNumChannels());
 

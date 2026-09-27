@@ -1,5 +1,6 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "StreamDeckBackgroundController.h"
+#include "StreamDeckNativeClient.h"
 #include "httplib.h"
 #include "../../FrameSurface/FrameSurface.h"
 #include <algorithm>
@@ -20,7 +21,8 @@ struct Session
 {
     int port = 0;
     std::string token;
-    bool operator==(const Session& other) const { return port == other.port && token == other.token; }
+    std::shared_ptr<NativeClient> native;
+    bool operator==(const Session& other) const { return port == other.port && token == other.token && native == other.native; }
 };
 
 Session ReadSession(const std::string& path)
@@ -41,11 +43,19 @@ Session ReadSession(const std::string& path)
        || !std::all_of(token.begin(), token.end(), [](unsigned char c)
           { return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-' || c == '_'; }))
         throw std::runtime_error("Session file unavailable or invalid");
-    return {static_cast<int>(port), token};
+    return {static_cast<int>(port), token, {}};
+}
+
+Session ReadSession(const Options& options,std::shared_ptr<NativeClient>& native)
+{
+    if(options.transport!="native")return ReadSession(options.session_file);
+    if(!native)native=std::make_shared<NativeClient>(options.native_library,options.native_lock_directory,options.fps);
+    return {0,{},native};
 }
 
 json Request(const Session& session, const char* method, const char* path, const std::string& body = {})
 {
+    if(session.native)return session.native->Request(path,body);
     /* Literal loopback, no environment proxy, redirects, cookies or remote URL. */
     httplib::Client client("127.0.0.1", session.port);
     client.set_connection_timeout(0, 400000);
@@ -82,12 +92,23 @@ bool ParseOptions(const nlohmann::json& settings, Options& options)
     if(settings.is_null() || (settings.is_object() && !settings.contains("enabled"))) return false;
     if(!settings.is_object() || !settings["enabled"].is_boolean()) throw std::runtime_error("enabled must be a boolean");
     if(!settings["enabled"].get<bool>()) return false;
-    if(!settings.contains("session_file") || !settings["session_file"].is_string())
-        throw std::runtime_error("An absolute session_file is required");
-    options.session_file = settings["session_file"].get<std::string>();
-    if(options.session_file.empty() || options.session_file.find_first_of("\r\n") != std::string::npos
-       || !std::filesystem::u8path(options.session_file).is_absolute())
-        throw std::runtime_error("An absolute session_file is required");
+    options.transport="bridge";
+    if(settings.contains("transport")) {
+        if(!settings["transport"].is_string())throw std::runtime_error("transport must be bridge or native");
+        options.transport=settings["transport"].get<std::string>();
+    }
+    if(options.transport!="bridge" && options.transport!="native")throw std::runtime_error("transport must be bridge or native");
+    const auto absolute=[&](const char* key) {
+        if(!settings.contains(key) || !settings[key].is_string())throw std::runtime_error(std::string("An absolute ")+key+" is required");
+        const auto value=settings[key].get<std::string>();
+        if(value.empty() || value.find_first_of("\r\n")!=std::string::npos || !std::filesystem::u8path(value).is_absolute())
+            throw std::runtime_error(std::string("An absolute ")+key+" is required");
+        return value;
+    };
+    if(options.transport=="native") {
+        options.native_library=absolute("native_library");
+        options.native_lock_directory=absolute("native_lock_directory");
+    }else options.session_file=absolute("session_file");
     if(settings.contains("fps"))
     {
         if(!settings["fps"].is_number_integer()) throw std::runtime_error("fps must be an integer from 1 to 20");
@@ -292,6 +313,7 @@ void Controller::Failure(const std::string& reason)
 void Controller::Run()
 {
     if(!options.surface_channel.empty()) { RunSurface();return; }
+    std::shared_ptr<NativeClient> native;
     Session ready_session, attempted_session;
     Layout layout;
     bool ready = false, attempted_any = false, sent_native = false;
@@ -364,7 +386,7 @@ void Controller::Run()
         if(!have_input) { release();continue; }
         try
         {
-            const Session session = ReadSession(options.session_file);
+            const Session session = ReadSession(options,native);
             if(!ready || !(session == ready_session))
             {
                 ready = false;
@@ -423,12 +445,14 @@ void Controller::Run()
         }
     }
     release();
+    if(native) {const auto error=native->Close();if(!error.empty())Failure(error);}
     std::lock_guard<std::mutex> lock(mutex);
     status.state = "stopped";
 }
 
 void Controller::RunSurface()
 {
+    std::shared_ptr<NativeClient> native;
     room_surface::Reader reader(options.surface_channel);
     room_surface::Frame frame;
     Session ready_session, attempted_session;
@@ -487,7 +511,7 @@ void Controller::RunSurface()
            && Clock::now()<last_sent+std::chrono::milliseconds(500)) continue;
         try
         {
-            const Session session=ReadSession(options.session_file);
+            const Session session=ReadSession(options,native);
             if(!ready || !(session==ready_session))
             {
                 ready=false;
@@ -521,6 +545,7 @@ void Controller::RunSurface()
         }
     }
     release();
+    if(native) {const auto error=native->Close();if(!error.empty())Failure(error);}
     std::lock_guard<std::mutex> lock(mutex);status.state="stopped";
 }
 }

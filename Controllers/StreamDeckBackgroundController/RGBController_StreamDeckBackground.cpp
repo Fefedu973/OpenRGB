@@ -19,11 +19,11 @@ RGBController_StreamDeckBackground::RGBController_StreamDeckBackground(const str
       controller(options, [](const std::string& reason){ LOG_WARNING("[Stream Deck Background] %s", reason.c_str()); })
 {
     name = "Stream Deck Background Canvas";
-    vendor = "Elgato / local compositor bridge";
+    vendor = options.transport=="native" ? "Elgato / native in-process compositor" : "Elgato / local compositor bridge";
     type = DEVICE_TYPE_ACCESSORY;
     description = surface_input ? "Native FrameSurface image input; compatibility LED updates ignored; Elgato local hook required"
                                 : "80x50 background pixels; Elgato application and local hook required";
-    location = "Loopback: Stream Deck Background API";
+    location = options.transport=="native" ? "Native Frida Core: guarded Elgato compositor" : "Loopback: Stream Deck Background API";
     serial = "room-streamdeck-background-mk2";
     version = "1.0";
     mode direct;

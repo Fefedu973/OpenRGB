@@ -9,7 +9,8 @@ namespace GoveeBluetooth
 class Session
 {
 public:
-    Session(Profile profile, Transport& transport, bool power_on_acquire = false);
+    Session(Profile profile, Transport& transport);
+    Session(Profile profile, Transport& transport, bool power_on_acquire);
     void Step(const Frame& frame, uint64_t now_ms);
     void Release();
     std::string State() const { return state; }
@@ -18,7 +19,8 @@ private:
     void Initialize(const Frame& frame, uint64_t now_ms);
     void ObservePower(uint8_t current);
     void SetPower(bool on);
-    void SendClassicColor(const Frame& frame, bool force);
+    void SendClassicColor(const Frame& frame, bool force, uint64_t now_ms);
+    void SendRealtimeColor(const Frame& frame, bool force);
     Profile profile;
     Transport& transport;
     bool power_on_acquire;
@@ -29,6 +31,8 @@ private:
     bool recovery_pending = false;
     bool realtime_started = false;
     bool blackout_owned = false;
+    bool acquire_on_pending = false;
+    bool acquire_power_owned = false;
     bool external_off = false;
     bool sent = false;
     uint8_t power = 0;
@@ -37,6 +41,7 @@ private:
     Packet original_mode{};
     Frame last_frame{};
     uint64_t last_power_ms = 0;
+    uint64_t last_color_check_ms = 0;
     std::string state = "idle";
 };
 }

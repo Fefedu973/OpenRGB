@@ -61,7 +61,7 @@ bool KBHEController::Exchange(const Report& report, Reply& reply)
             continue;
         }
         /* All five frame chunks share an opcode, so correlate the chunk index too. */
-        if(report[1] == 0x6A && payload[2] != report[3])
+        if((report[1] == 0x6A || report[1] == 0x68) && payload[2] != report[3])
         {
             continue;
         }
@@ -134,6 +134,30 @@ bool KBHEController::EnterDirectMode()
     }
     enabled_snapshot = reply[2];
     enabled_snapshot_valid = true;
+    if(!ExpectOK(Command(0x6E), reply))
+    {
+        return false;
+    }
+    mode_snapshot = reply[2];
+    mode_snapshot_valid = true;
+    live_snapshot_valid = false;
+    if(mode_snapshot == LIVE_MODE)
+    {
+        // GET_ALL returns pixels_runtime, including a previous owner's live
+        // image. Rewriting mode 7 does not create the firmware restore token.
+        if(!ReadFrame(live_snapshot) || !ExpectOK(Command(0x6E), reply))
+        {
+            return false;
+        }
+        if(reply[2] != LIVE_MODE)
+        {
+            last_error = "Hardware mode changed while reading the initial live image";
+            return false;
+        }
+        live_snapshot_valid = true;
+    }
+    restore_pending_enabled = false;
+    restoration_result = "pending";
     /* Mark possible ownership before the mutating write: a lost ACK does not
      * prove the command failed to reach the keyboard. Cleanup remains possible. */
     owns_mode = true;
@@ -179,11 +203,38 @@ bool KBHEController::SendFrame(const Frame& frame)
     }
     if(reply[2] != LIVE_MODE)
     {
-        owns_mode = false;
-        enabled_snapshot_valid = false;
+        ClearOwnership();
+        restoration_result = "external_mode_preserved";
         last_error = "Hardware mode changed externally; select Direct again to reacquire";
         return false;
     }
+    return WriteFrame(frame);
+}
+
+bool KBHEController::ReadFrame(Frame& frame)
+{
+    Reply reply{};
+    for(std::size_t chunk = 0; chunk < CHUNK_COUNT; ++chunk)
+    {
+        const std::size_t offset = chunk * CHUNK_BYTES;
+        const std::size_t size = std::min(CHUNK_BYTES, FRAME_BYTES - offset);
+        if(!ExpectOK(Command(0x68, {static_cast<unsigned char>(chunk)}), reply))
+        {
+            return false;
+        }
+        if(reply[3] != size)
+        {
+            last_error = "Firmware returned an unexpected RGB snapshot chunk size";
+            return false;
+        }
+        std::copy_n(reply.begin() + 4, size, frame.begin() + offset);
+    }
+    return true;
+}
+
+bool KBHEController::WriteFrame(const Frame& frame)
+{
+    Reply reply{};
     for(const Report& report : FrameReports(frame))
     {
         if(!ExpectOK(report, reply))
@@ -200,6 +251,15 @@ bool KBHEController::SendFrame(const Frame& frame)
     return true;
 }
 
+void KBHEController::ClearOwnership()
+{
+    owns_mode = false;
+    enabled_snapshot_valid = false;
+    mode_snapshot_valid = false;
+    live_snapshot_valid = false;
+    restore_pending_enabled = false;
+}
+
 bool KBHEController::RestoreUnlocked()
 {
     if(!owns_mode)
@@ -213,22 +273,88 @@ bool KBHEController::RestoreUnlocked()
     {
         return false;
     }
-    if(reply[2] != LIVE_MODE)
+    const unsigned char current_mode = reply[2];
+    if(restore_pending_enabled && current_mode != restored_mode)
     {
-        owns_mode = false;
-        enabled_snapshot_valid = false;
+        ClearOwnership();
+        restoration_result = "external_mode_preserved";
         return true;
     }
-    if(!ExpectOK(Command(0x76), reply))
+    if(!restore_pending_enabled && current_mode != LIVE_MODE)
     {
-        return false;
+        ClearOwnership();
+        restoration_result = "external_mode_preserved";
+        return true;
     }
-    if(enabled_snapshot_valid && !ExpectOK(Command(0x61, {enabled_snapshot}), reply))
+    if(!restore_pending_enabled)
     {
-        return false;
+        if(!Exchange(Command(0x76), reply))
+        {
+            return false;
+        }
+        if(reply[1] == 0 && reply[2] != LIVE_MODE)
+        {
+            restored_mode = reply[2];
+            restoration_result = "firmware_previous_effect_restored";
+        }
+        else if(reply[1] == 1 && reply[2] == LIVE_MODE && mode_snapshot_valid)
+        {
+            // Status 1 means the firmware has no restore token. It happens
+            // when mode 7 was already active before this controller acquired it.
+            // Only return to a mode/image actually observed before our writes.
+            if(mode_snapshot != LIVE_MODE)
+            {
+                if(!ExpectOK(Command(0x6F, {mode_snapshot}), reply) || reply[2] != mode_snapshot)
+                {
+                    if(last_error.empty()) last_error = "Firmware did not restore the observed hardware mode";
+                    return false;
+                }
+                restored_mode = mode_snapshot;
+                restoration_result = "observed_hardware_mode_restored";
+            }
+            else
+            {
+                if(!live_snapshot_valid || !ExpectOK(Command(0x6E), reply) || reply[2] != LIVE_MODE)
+                {
+                    if(last_error.empty()) last_error = "Cannot safely restore the initial live image";
+                    return false;
+                }
+                Frame verification{};
+                if(!WriteFrame(live_snapshot) || !ReadFrame(verification)) return false;
+                if(verification != live_snapshot)
+                {
+                    last_error = "Initial live image restoration readback differs";
+                    return false;
+                }
+                restored_mode = LIVE_MODE;
+                restoration_result = "initial_live_image_restored_prior_effect_unknown";
+            }
+        }
+        else
+        {
+            last_error = "Firmware rejected restore command 118 (status " + std::to_string(reply[1]) + ")";
+            return false;
+        }
+        if(!ExpectOK(Command(0x6E), reply) || reply[2] != restored_mode)
+        {
+            if(last_error.empty()) last_error = "Restored hardware mode readback differs";
+            return false;
+        }
+        // If only restoring the enable bit fails, retry that operation without
+        // mistaking our just-restored non-live mode for an external takeover.
+        restore_pending_enabled = true;
     }
-    owns_mode = false;
-    enabled_snapshot_valid = false;
+    if(enabled_snapshot_valid)
+    {
+        if(!ExpectOK(Command(0x61, {enabled_snapshot}), reply) || reply[2] != enabled_snapshot ||
+           !ExpectOK(Command(0x60), reply) || reply[2] != enabled_snapshot)
+        {
+            if(last_error.empty()) last_error = "Restored RGB enable state readback differs";
+            return false;
+        }
+    }
+    ClearOwnership();
+    last_error.clear();
     return true;
 }
 

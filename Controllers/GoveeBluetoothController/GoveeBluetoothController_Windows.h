@@ -4,6 +4,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <mutex>
+#include <optional>
 #include <thread>
 
 namespace GoveeBluetooth
@@ -16,7 +17,8 @@ struct Configuration
     Key key{};
     std::string name;
     std::string serial;
-    bool power_on_acquire = false;
+    std::optional<bool> power_on_acquire;
+    bool PowerOnAcquire() const { return power_on_acquire.value_or(profile == Profile::H6008); }
 };
 
 class Controller

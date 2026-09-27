@@ -6,7 +6,8 @@
       "name": "Example bulb - replace private addresses and key path",
       "address": "02:00:00:00:00:01",
       "wifi_mac": "02:00:00:00:00:02",
-      "key_file": "C:/private/govee-communication-key.hex"
+      "key_file": "C:/private/govee-communication-key.hex",
+      "power_on_acquire": true
     },
     {
       "enabled": false,

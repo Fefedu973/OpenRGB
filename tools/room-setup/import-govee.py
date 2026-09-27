@@ -24,7 +24,7 @@ def convert(source, destination):
         classic = item.get('model') == 'H6159' or 'h6159' in item.get('profile', '').lower()
         result = {'profile': 'h6159-classic-v1' if classic else 'h6008-realtime-v1',
                   'address': item['ble_address'], 'name': item.get('name', ''),
-                  'enabled': True, 'power_on_acquire': False}
+                  'enabled': True, 'power_on_acquire': bool(item.get('power_on_acquire', not classic))}
         if not classic:
             result['wifi_mac'] = item['wifi_mac']
         devices.append(result)

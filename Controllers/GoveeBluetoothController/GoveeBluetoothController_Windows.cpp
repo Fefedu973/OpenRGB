@@ -106,25 +106,71 @@ struct Inbox
     std::mutex mutex;
     std::condition_variable changed;
     std::deque<Packet> packets;
+    unsigned int events = 0, wrong_length = 0, callback_errors = 0;
+};
+
+// Diagnostic metadata only. No packet bytes, keys, identities or addresses.
+// Read from the owning MTA thread; callbacks touch only the locked Inbox.
+struct TransportDiagnostics
+{
+    int connection_status = -1, session_status = -1;
+    int subscribe_status = -1, unsubscribe_status = -1;
+    int disconnect_connection_status = -1, disconnect_session_status = -1;
+    int64_t subscribe_ms = -1, unsubscribe_ms = -1;
+    unsigned int notification_events = 0, wrong_length = 0, callback_errors = 0;
+    bool authenticated = false;
+};
+
+// Only the standalone read-only probe supplies these comparison options.
+// Production Controller construction keeps both false; no settings enable them.
+struct TransportProbeOptions
+{
+    bool full_services = false;
+    bool auth_write_response = false;
 };
 
 class WindowsTransport : public Transport
 {
 public:
-    WindowsTransport(const Configuration& configuration_, std::atomic<bool>& stop_) :
-        configuration(configuration_), stop(stop_), inbox(std::make_shared<Inbox>()) {}
+    WindowsTransport(const Configuration& configuration_, std::atomic<bool>& stop_, TransportProbeOptions probe_options_ = {}) :
+        configuration(configuration_), stop(stop_), inbox(std::make_shared<Inbox>()), probe_options(probe_options_) {}
     ~WindowsTransport() override { Disconnect(); SecureZeroMemory(session_key.data(), session_key.size()); }
 
     bool Connected() const override
     {
-        return authenticated && device && device.ConnectionStatus() == BluetoothConnectionStatus::Connected;
+        return authenticated && device && session && session.SessionStatus() == GattSessionStatus::Active;
     }
 
     void BeginRestore() { restoring = true; restore_deadline = Clock::now() + 5s; }
 
+    TransportDiagnostics Diagnostics() const
+    {
+        auto result = diagnostics;
+        try { result.connection_status = device ? static_cast<int>(device.ConnectionStatus()) : -1; }
+        catch(...) { result.connection_status = -2; }
+        try { result.session_status = session ? static_cast<int>(session.SessionStatus()) : -1; }
+        catch(...) { result.session_status = -2; }
+        result.authenticated = authenticated;
+        std::lock_guard<std::mutex> lock(inbox->mutex);
+        result.notification_events = inbox->events;
+        result.wrong_length = inbox->wrong_length;
+        result.callback_errors = inbox->callback_errors;
+        return result;
+    }
+
+    std::pair<int, int> ReadNotificationConfiguration()
+    {
+        if(!notify) throw std::runtime_error("Govee BLE notification characteristic unavailable");
+        const auto result = Wait(notify.ReadClientCharacteristicConfigurationDescriptorAsync());
+        return {static_cast<int>(result.Status()),
+            result.Status() == GattCommunicationStatus::Success ?
+            static_cast<int>(result.ClientCharacteristicConfigurationDescriptor()) : -1};
+    }
+
     void Connect() override
     {
         Disconnect();
+        diagnostics = TransportDiagnostics{};
         // A late callback from the old GATT connection may still run after its
         // event token is revoked. A fresh inbox isolates connection generations.
         inbox = std::make_shared<Inbox>();
@@ -140,16 +186,43 @@ public:
                 if(name.find("H6159") == std::string::npos)
                     throw std::runtime_error("Configured BLE device name does not identify H6159");
             }
+            // Match the explicit client-owned lifetime used by Bleak/WinRT.
+            // Uncached discovery also initiates a connection; maintaining this
+            // session additionally keeps ownership between notifications/writes.
+            session = Wait(GattSession::FromDeviceIdAsync(device.BluetoothDeviceId()));
+            if(!session || !session.CanMaintainConnection())
+                throw std::runtime_error("Govee BLE GATT session cannot maintain a connection");
+            session.MaintainConnection(true);
             const winrt::guid service_id(L"00010203-0405-0607-0809-0a0b0c0d1910");
             const winrt::guid notify_id(L"00010203-0405-0607-0809-0a0b0c0d2b10");
             const winrt::guid write_id(L"00010203-0405-0607-0809-0a0b0c0d2b11");
-            auto services = Wait(device.GetGattServicesForUuidAsync(service_id, BluetoothCacheMode::Uncached));
-            if(services.Status() != GattCommunicationStatus::Success || services.Services().Size() != 1)
-                throw std::runtime_error("Govee BLE uncached service discovery failed");
-            service = services.Services().GetAt(0);
+            // The tested H6159 returned Success with zero entries for a
+            // UUID-filtered query. Bleak enumerates the allowlisted device's
+            // complete service table and selects the Govee UUID afterwards.
+            auto services = (configuration.profile == Profile::H6159 || probe_options.full_services) ?
+                Wait(device.GetGattServicesAsync(BluetoothCacheMode::Uncached)) :
+                Wait(device.GetGattServicesForUuidAsync(service_id, BluetoothCacheMode::Uncached));
+            const unsigned int service_count = services.Status() == GattCommunicationStatus::Success ? services.Services().Size() : 0;
+            if(services.Status() != GattCommunicationStatus::Success)
+                throw std::runtime_error("Govee BLE uncached service discovery failed: status=" +
+                    std::to_string(static_cast<int>(services.Status())) + " count=" + std::to_string(service_count));
+            unsigned int matched_services = 0;
+            for(const auto& candidate : services.Services())
+            {
+                discovered_services.push_back(candidate);
+                if(candidate.Uuid() == service_id)
+                {
+                    service = candidate;
+                    ++matched_services;
+                }
+            }
+            if(matched_services != 1)
+                throw std::runtime_error("Govee BLE required service discovery failed: status=0 count=" +
+                    std::to_string(service_count) + " matches=" + std::to_string(matched_services));
             auto characteristics = Wait(service.GetCharacteristicsAsync(BluetoothCacheMode::Uncached));
             if(characteristics.Status() != GattCommunicationStatus::Success)
-                throw std::runtime_error("Govee BLE uncached characteristic discovery failed");
+                throw std::runtime_error("Govee BLE uncached characteristic discovery failed: status=" +
+                    std::to_string(static_cast<int>(characteristics.Status())));
             for(const auto& characteristic : characteristics.Characteristics())
             {
                 if(characteristic.Uuid() == notify_id) notify = characteristic;
@@ -158,10 +231,17 @@ public:
             if(!notify || !write) throw std::runtime_error("Govee BLE required GATT characteristics are missing");
             const auto np = notify.CharacteristicProperties();
             const auto wp = write.CharacteristicProperties();
-            const auto required_write = configuration.profile == Profile::H6159 ?
-                GattCharacteristicProperties::Write : GattCharacteristicProperties::WriteWithoutResponse;
-            if((wp & required_write) == GattCharacteristicProperties::None)
+            if(!HasRequiredWriteProperty(configuration.profile,
+                (wp & GattCharacteristicProperties::Write) != GattCharacteristicProperties::None,
+                (wp & GattCharacteristicProperties::WriteWithoutResponse) != GattCharacteristicProperties::None))
                 throw std::runtime_error("Govee BLE required GATT write property is missing");
+            const auto session_deadline = Clock::now() + 8s;
+            while(session.SessionStatus() != GattSessionStatus::Active)
+            {
+                if(Interrupted() || Clock::now() >= session_deadline)
+                    throw std::runtime_error("Govee BLE GATT session did not become active");
+                std::this_thread::sleep_for(10ms);
+            }
             auto subscription = GattClientCharacteristicConfigurationDescriptorValue::None;
             if((np & GattCharacteristicProperties::Notify) != GattCharacteristicProperties::None)
                 subscription = GattClientCharacteristicConfigurationDescriptorValue::Notify;
@@ -175,34 +255,46 @@ public:
             {
                 try
                 {
+                    std::lock_guard<std::mutex> lock(target->mutex);
+                    ++target->events;
                     auto buffer = args.CharacteristicValue();
-                    if(buffer.Length() != 20) return;
+                    if(buffer.Length() != 20) { ++target->wrong_length; return; }
                     Packet packet{};
                     DataReader::FromBuffer(buffer).ReadBytes(winrt::array_view<uint8_t>(packet));
-                    std::lock_guard<std::mutex> lock(target->mutex);
                     if(target->packets.size() == 64) target->packets.pop_front();
                     target->packets.push_back(packet);
                     target->changed.notify_one();
                 }
-                catch(...) { /* Invalid notification is ignored, never escapes into WinRT. */ }
+                catch(...)
+                {
+                    std::lock_guard<std::mutex> lock(target->mutex);
+                    ++target->callback_errors; // Never log the rejected notification.
+                }
             });
             registered = true;
-            if(Wait(notify.WriteClientCharacteristicConfigurationDescriptorAsync(subscription)) != GattCommunicationStatus::Success)
-                throw std::runtime_error("Govee BLE notification subscription failed");
+            const auto subscription_start = Clock::now();
+            diagnostics.subscribe_status = -2;
+            const auto subscription_status = Wait(notify.WriteClientCharacteristicConfigurationDescriptorAsync(subscription));
+            diagnostics.subscribe_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - subscription_start).count();
+            diagnostics.subscribe_status = static_cast<int>(subscription_status);
+            if(subscription_status != GattCommunicationStatus::Success)
+                throw std::runtime_error("Govee BLE notification subscription failed: status=" +
+                    std::to_string(static_cast<int>(subscription_status)));
+            subscribed = true;
             if(configuration.profile == Profile::H6008)
             {
                 Packet response{};
                 for(unsigned int attempt = 0; attempt < 2; ++attempt)
                 {
                     ClearInbox();
-                    WriteRaw(Crypt(Handshake(1), configuration.key, false));
+                    WriteRaw(Crypt(Handshake(1), configuration.key, false), true);
                     try { response = Receive(0xE7, 1, &configuration.key); break; }
                     catch(const ReplyTimeout&) { if(attempt == 1) throw; }
                 }
                 Key candidate{};
                 std::copy_n(response.begin() + 2, 16, candidate.begin());
                 ClearInbox();
-                WriteRaw(Crypt(Handshake(2), configuration.key, false));
+                WriteRaw(Crypt(Handshake(2), configuration.key, false), true);
                 Receive(0xE7, 2, &configuration.key);
                 session_key = candidate;
                 authenticated = true;
@@ -239,21 +331,79 @@ public:
 
     void Disconnect() noexcept override
     {
+        const auto before = Diagnostics();
+        if(device || session)
+        {
+            diagnostics.disconnect_connection_status = before.connection_status;
+            diagnostics.disconnect_session_status = before.session_status;
+        }
         authenticated = false;
+        // Match stop_notify before revoking the callback. This is best effort:
+        // an unavailable radio must not add the normal eight-second GATT wait
+        // to destruction or exceed the shared restoration deadline.
+        if(subscribed && notify && !Interrupted())
+        {
+            const auto unsubscribe_start = Clock::now();
+            diagnostics.unsubscribe_status = -2;
+            try
+            {
+                auto operation = notify.WriteClientCharacteristicConfigurationDescriptorAsync(
+                    GattClientCharacteristicConfigurationDescriptorValue::None);
+                const auto deadline = Clock::now() + 250ms;
+                while(operation.Status() == AsyncStatus::Started && !Interrupted() && Clock::now() < deadline)
+                    std::this_thread::sleep_for(5ms);
+                if(operation.Status() == AsyncStatus::Started)
+                {
+                    operation.Cancel();
+                    diagnostics.unsubscribe_status = -3;
+                }
+                else if(operation.Status() == AsyncStatus::Completed)
+                    diagnostics.unsubscribe_status = static_cast<int>(operation.GetResults());
+            }
+            catch(...) { /* A failed unsubscribe must not prevent object cleanup. */ }
+            diagnostics.unsubscribe_ms = std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - unsubscribe_start).count();
+        }
+        subscribed = false;
         if(registered && notify)
         {
             try { notify.ValueChanged(notification_token); } catch(...) {}
         }
         registered = false;
         notify = nullptr; write = nullptr;
-        if(service) { try { service.Close(); } catch(...) {} service = nullptr; }
+        // Bleak's WinRT disconnect allows 100 ms for notifications/operations
+        // to settle before closing services (Windows Close can otherwise hang).
+        // Keep this interruptible; synchronous WinRT Close itself is not an
+        // operation whose cancellation or maximum duration we can guarantee.
+        if(!discovered_services.empty())
+        {
+            const auto settle_deadline = Clock::now() + 100ms;
+            while(!Interrupted() && Clock::now() < settle_deadline)
+                std::this_thread::sleep_for(5ms);
+        }
+        service = nullptr;
+        for(auto& discovered : discovered_services) { try { discovered.Close(); } catch(...) {} }
+        discovered_services.clear();
+        if(session) { try { session.MaintainConnection(false); } catch(...) {} }
+        if(session) { try { session.Close(); } catch(...) {} session = nullptr; }
         if(device) { try { device.Close(); } catch(...) {} device = nullptr; }
         SecureZeroMemory(session_key.data(), session_key.size());
         ClearInbox();
     }
 
 private:
-    struct ReplyTimeout : std::runtime_error { ReplyTimeout() : std::runtime_error("Govee BLE state/authentication reply timed out") {} };
+    struct ReplyTimeout : std::runtime_error
+    {
+        ReplyTimeout(uint8_t prefix, uint8_t command, unsigned int received, unsigned int invalid, unsigned int unrelated) :
+            std::runtime_error(Message(prefix, command, received, invalid, unrelated)) {}
+        static std::string Message(uint8_t prefix, uint8_t command, unsigned int received, unsigned int invalid, unsigned int unrelated)
+        {
+            std::ostringstream text;
+            text << "Govee BLE reply timeout prefix=0x" << std::hex << std::uppercase << static_cast<unsigned int>(prefix)
+                 << " command=0x" << static_cast<unsigned int>(command) << std::dec
+                 << " received=" << received << " invalid_checksum=" << invalid << " unrelated=" << unrelated;
+            return text.str(); // No payload, address, key, identity or nonce is logged.
+        }
+    };
 
     bool Interrupted() const { return restoring ? Clock::now() >= restore_deadline : stop.load(); }
 
@@ -287,19 +437,22 @@ private:
         inbox->packets.clear();
     }
 
-    void WriteRaw(const Packet& packet)
+    void WriteRaw(const Packet& packet, bool authentication = false)
     {
         if(Interrupted()) throw std::runtime_error("Govee BLE operation cancelled");
         DataWriter writer;
         writer.WriteBytes(winrt::array_view<const uint8_t>(packet));
-        auto option = configuration.profile == Profile::H6159 ? GattWriteOption::WriteWithResponse : GattWriteOption::WriteWithoutResponse;
-        if(Wait(write.WriteValueAsync(writer.DetachBuffer(), option)) != GattCommunicationStatus::Success)
-            throw std::runtime_error("Govee BLE GATT write failed");
+        auto option = configuration.profile == Profile::H6159 || (authentication && probe_options.auth_write_response) ?
+            GattWriteOption::WriteWithResponse : GattWriteOption::WriteWithoutResponse;
+        const auto status = Wait(write.WriteValueAsync(writer.DetachBuffer(), option));
+        if(status != GattCommunicationStatus::Success)
+            throw std::runtime_error("Govee BLE GATT write failed: status=" + std::to_string(static_cast<int>(status)));
     }
 
     Packet Receive(uint8_t prefix, uint8_t command, const Key* key)
     {
         const auto deadline = Clock::now() + 3s;
+        unsigned int received = 0, invalid = 0, unrelated = 0;
         while(Clock::now() < deadline)
         {
             if(Interrupted()) throw std::runtime_error("Govee BLE reply wait cancelled");
@@ -310,22 +463,29 @@ private:
                 if(inbox->packets.empty()) continue;
                 packet = inbox->packets.front(); inbox->packets.pop_front();
             }
+            ++received;
             if(key) packet = Crypt(packet, *key, true);
             if(ValidPacket(packet) && packet[0] == prefix && packet[1] == command) return packet;
+            if(!ValidPacket(packet)) ++invalid;
+            else ++unrelated;
         }
-        throw ReplyTimeout();
+        throw ReplyTimeout(prefix, command, received, invalid, unrelated);
     }
 
     const Configuration& configuration;
     std::atomic<bool>& stop;
     std::shared_ptr<Inbox> inbox;
     BluetoothLEDevice device{nullptr};
+    GattSession session{nullptr};
     GattDeviceService service{nullptr};
+    std::vector<GattDeviceService> discovered_services;
     GattCharacteristic notify{nullptr}, write{nullptr};
     winrt::event_token notification_token{};
-    bool registered = false, authenticated = false, restoring = false;
+    bool registered = false, subscribed = false, authenticated = false, restoring = false;
     Clock::time_point restore_deadline{};
     Key session_key{};
+    TransportDiagnostics diagnostics;
+    const TransportProbeOptions probe_options;
 };
 
 Controller::Controller(Configuration configuration_) : configuration(std::move(configuration_))
@@ -364,7 +524,7 @@ void Controller::Run()
     }
     {
         WindowsTransport transport(configuration, stopping);
-        Session session(configuration.profile, transport, configuration.power_on_acquire);
+        Session session(configuration.profile, transport, configuration.PowerOnAcquire());
         unsigned int failures = 0;
         auto next_step = Clock::now();
         std::string previous_state;

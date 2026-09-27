@@ -16,6 +16,7 @@
 #include "ResourceManager.h"
 #include "SettingsManager.h"
 #include "LogitechProtocolCommon.h"
+#include "LogitechReceiverIdentity.h"
 #include "LogitechG203LController.h"
 #include "LogitechG213Controller.h"
 #include "LogitechG600Controller.h"
@@ -239,50 +240,16 @@ DetectedControllers DetectLogitechKeyboardG915(hid_device_info* info, const std:
 
 static bool ProbeG915ReceiverName(hid_device* dev, std::string& out_name)
 {
-    /*---------------------------------------------------------*\n    | HID++ short message name probe.                           |
-    | Request:  10 01 03 0E 00 00 00  (get name length)         |
-    | Request:  10 01 03 1E 00 00 00  (get name string)         |
-    | Response: 11 01 03 1E <name bytes...>                     |
-    | Verified against G915 TKL (PID 0xC547) which returns      |
-    | "G915 TKL LIGHTSP" (truncated, full: G915 TKL LIGHTSPEED) |
-    \*---------------------------------------------------------*/
-    const unsigned char req_len[7]  = { 0x10, 0x01, 0x03, 0x0E, 0x00, 0x00, 0x00 };
-    const unsigned char req_name[7] = { 0x10, 0x01, 0x03, 0x1E, 0x00, 0x00, 0x00 };
-    unsigned char resp[64] = { 0 };
-
-    hid_write(dev, req_len, sizeof(req_len));
-    hid_read_timeout(dev, resp, sizeof(resp), 100);
-
-    hid_write(dev, req_name, sizeof(req_name));
-    for(int attempt = 0; attempt < 3; attempt++)
-    {
-        int rd = hid_read_timeout(dev, resp, sizeof(resp), 200);
-        if(rd < 8)
-        {
-            continue;
-        }
-        if(resp[0] == 0x11 && resp[1] == 0x01 && resp[2] == 0x03 && resp[3] == 0x1E)
-        {
-            std::string name_str;
-            for(int i = 4; i < rd; i++)
-            {
-                if(resp[i] == 0x00)
-                {
-                    break;
-                }
-                name_str.push_back(static_cast<char>(resp[i]));
-            }
-            out_name = name_str;
-            return true;
-        }
-    }
-    return false;
+    return LogitechProbeReceiverName(
+        [dev](const unsigned char* data, size_t size) { return hid_write(dev, data, size); },
+        [dev](unsigned char* data, size_t size, int timeout)
+        { return hid_read_timeout(dev, data, size, timeout); }, out_name);
 }
 
 DetectedControllers DetectLogitechKeyboardG915Receiver2(hid_device_info* info, const std::string& name)
 {
     /*---------------------------------------------------------*\
-    | PID 0xC547 is shared by multiple Logitech keyboards.      |
+    | PID 0xC547 is shared by Logitech keyboards and mice.      |
     | Use a HID++ name probe to identify the exact device and   |
     | route to the correct controller.                          |
     |                                                           |
@@ -585,44 +552,6 @@ DetectedControllers DetectLogitechX56(hid_device_info* info, const std::string& 
 | key apart. Linux/macOS paths carry no &Col token, so      |
 | neither trim runs and a path names itself.                |
 \*---------------------------------------------------------*/
-static std::string LogitechDevicePathKey(const char* path)
-{
-    std::string key        = (path != nullptr) ? path : "";
-    bool        collection = false;
-
-    for(size_t pos = 0; pos + 4 <= key.size(); pos++)
-    {
-        if((key[pos] == '&')
-        && (key[pos + 1] == 'c' || key[pos + 1] == 'C')
-        && (key[pos + 2] == 'o' || key[pos + 2] == 'O')
-        && (key[pos + 3] == 'l' || key[pos + 3] == 'L'))
-        {
-            size_t end = pos + 4;
-
-            while(end < key.size() && isxdigit((unsigned char)key[end]))
-            {
-                end++;
-            }
-
-            key.erase(pos, end - pos);
-            collection = true;
-            break;
-        }
-    }
-
-    if(collection)
-    {
-        size_t guid = key.rfind('#');
-        size_t last = (guid == std::string::npos) ? std::string::npos : key.rfind('&', guid);
-
-        if(last != std::string::npos)
-        {
-            key.erase(last, guid - last);
-        }
-    }
-
-    return key;
-}
 
 usages BundleLogitechUsages(hid_device_info* info)
 {
@@ -635,14 +564,14 @@ usages BundleLogitechUsages(hid_device_info* info)
     \*-----------------------------------------------------*/
     usages temp_usages;
 
-    std::string      device_key = LogitechDevicePathKey(info->path);
     hid_device_info* temp_info  = hid_enumerate(info->vendor_id, info->product_id);
     hid_device_info* enumerated = temp_info;
 
     while(temp_info)
     {
-        if(temp_info->interface_number == 2
-        && LogitechDevicePathKey(temp_info->path) == device_key)
+        if(LogitechSameReceiverCollection(info->path, temp_info->path,
+                                          info->interface_number, temp_info->interface_number,
+                                          temp_info->usage_page, temp_info->usage))
         {
             LOG_DEBUG("Attempting to open dev path: %s", temp_info->path);
             hid_device* dev = hid_open_path(temp_info->path);
@@ -650,7 +579,10 @@ usages BundleLogitechUsages(hid_device_info* info)
             if(dev)
             {
                 LOG_DEBUG("Success! Adding Usage %i for device @ path %s", temp_info->usage, temp_info->path);
-                temp_usages.emplace((uint8_t)temp_info->usage, dev);
+                if(!temp_usages.emplace((uint8_t)temp_info->usage, dev).second)
+                {
+                    hid_close(dev);
+                }
             }
             else
             {

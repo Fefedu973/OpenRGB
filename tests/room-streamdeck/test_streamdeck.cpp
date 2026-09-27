@@ -160,6 +160,11 @@ static void TestOptionsAndImage()
     Reject([&]{ParseOptions({{"enabled","true"}},options);});
     const auto absolute=(std::filesystem::temp_directory_path()/"synthetic.json").u8string();
     Check(ParseOptions({{"enabled",true},{"session_file",absolute},{"fps",20}},options),"Valid settings rejected");
+    Check(ParseOptions({{"enabled",true},{"transport","native"},{"native_library",absolute},{"native_lock_directory",absolute}},options)
+          && options.transport=="native","Valid optional native transport rejected");
+    Reject([&]{ParseOptions({{"enabled",true},{"transport","native"},{"native_library","relative.dll"},{"native_lock_directory",absolute}},options);});
+    Reject([&]{ParseOptions({{"enabled",true},{"transport","native"},{"native_library",absolute}},options);});
+    Reject([&]{ParseOptions({{"enabled",true},{"transport","unknown"},{"session_file",absolute}},options);});
     Reject([&]{ParseOptions({{"enabled",true},{"session_file",absolute},{"fps",21}},options);});
     Check(ParseOptions({{"enabled",true},{"session_file",absolute},{"frame_surface",{{"channel","ambient-main"},{"stale_ms",1000}}}},options)
           && options.surface_channel=="ambient-main", "Valid image input rejected");

@@ -30,6 +30,7 @@ Packet StartRealtime();
 Packet Realtime(RGB rgb);
 RGB ScaledRGB(const Frame& frame);
 uint8_t BrightnessRaw(uint8_t percent);
+bool HasRequiredWriteProperty(Profile profile, bool write, bool write_without_response);
 uint64_t ParseAddress(const std::string& address);
 Key ParseKey(const std::string& text);
 

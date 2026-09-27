@@ -1242,6 +1242,13 @@ int ProcessOptions(Options* options, std::vector<RGBController *>& rgb_controlle
 
 void ApplyOptions(DeviceOptions& options, std::vector<RGBController *>& rgb_controllers)
 {
+    // Listing/saving a profile supplies no device changes. Do not clear the
+    // active profile, select a mode or validate its color count in that case.
+    if(!options.hasOption)
+    {
+        return;
+    }
+
     RGBController* device = rgb_controllers[options.device];
 
     /*-----------------------------------------------------*\

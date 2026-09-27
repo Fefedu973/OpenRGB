@@ -60,9 +60,8 @@ DetectedControllers DetectGoveeBluetoothControllers()
                 device.serial = item.contains("address") ? item.at("address").get<std::string>() : item.at("ble_address").get<std::string>();
                 device.address = GoveeBluetooth::ParseAddress(device.serial);
                 if(addresses.count(device.address)) throw std::invalid_argument("Duplicate Govee BLE address");
-                device.power_on_acquire = item.value("power_on_acquire", false);
-                if(device.profile == GoveeBluetooth::Profile::H6008 && device.power_on_acquire)
-                    throw std::invalid_argument("H6008 profile does not claim power ownership");
+                if(item.contains("power_on_acquire"))
+                    device.power_on_acquire = item.at("power_on_acquire").get<bool>();
                 const std::string friendly = item.value("name", std::string());
                 if(friendly.size() > 80 || friendly.find_first_of("\r\n\t") != std::string::npos)
                     throw std::invalid_argument("Invalid Govee BLE friendly name");

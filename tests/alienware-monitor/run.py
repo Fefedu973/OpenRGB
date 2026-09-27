@@ -3,6 +3,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import sys
 
 here = pathlib.Path(__file__).resolve().parent
 root = here.parents[1]
@@ -22,3 +23,8 @@ subprocess.run([str(output), str(here / 'fixtures.json')], check=True)
 subprocess.run([compiler, *flags, '-fsyntax-only', str(directory / 'RGBController_AlienwareMonitor.cpp'),
                 str(directory / 'AlienwareMonitorControllerDetect.cpp')], check=True)
 print('RGB wrapper and detector compiled against actual upstream headers: PASS')
+if len(sys.argv) == 2:
+    dump = build / 'native-parity.json'
+    with dump.open('w', encoding='utf-8') as target:
+        subprocess.run([str(output), '--dump-parity'], stdout=target, check=True)
+    subprocess.run(['node', str(here / 'signal-parity.cjs'), str(dump), sys.argv[1]], check=True)

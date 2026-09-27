@@ -38,6 +38,7 @@ GoveeController::GoveeController(std::string ip, std::string mac)
     \*-----------------------------------------------------*/
     ip_address  = ip;
     module_mac  = GoveeDiscovery::NormalizeMac(mac);
+    port.sock   = INVALID_SOCKET;
 
     /*-----------------------------------------------------*\
     | Register callback for receiving broadcasts            |
@@ -72,6 +73,12 @@ GoveeController::GoveeController(std::string ip, std::string mac)
 GoveeController::~GoveeController()
 {
     UnregisterReceiveBroadcastCallback(this);
+    // net_port releases address metadata only; this instance owns its UDP socket.
+    if(port.sock != INVALID_SOCKET)
+    {
+        port.tcp_close();
+        port.sock = INVALID_SOCKET;
+    }
 }
 
 std::string GoveeController::GetLocation()
@@ -259,6 +266,16 @@ void GoveeController::SetPower(bool enabled)
 
 void GoveeController::SendScan()
 {
+    // A reply can update ip_address on the receive thread as soon as the first
+    // scan is sent. Capture the configured destination before either send.
+    sockaddr_in target = {};
+    target.sin_family = AF_INET;
+    target.sin_port = htons(4001);
+    bool valid_target;
+    {
+        std::lock_guard<std::mutex> lock(callbacks_mutex);
+        valid_target = inet_pton(AF_INET, ip_address.c_str(), &target.sin_addr) == 1;
+    }
     json command;
 
     command["msg"]["cmd"]                       = "scan";
@@ -274,6 +291,15 @@ void GoveeController::SendScan()
     std::string command_str                     = command.dump();
 
     broadcast_port.udp_write((char *)command_str.c_str(), (int)command_str.length() + 1);
+    // Some adapters/routers drop multicast discovery while unicast LAN control
+    // works. Use the SAME receive socket (bound to 4002) so replies reach the
+    // normal dispatcher. ReceiveBroadcast still requires the configured MAC;
+    // an unrelated device reusing a stale IP cannot claim this controller.
+    if(valid_target)
+    {
+        sendto(broadcast_port.sock, command_str.c_str(), (int)command_str.length() + 1,
+               0, reinterpret_cast<const sockaddr*>(&target), sizeof(target));
+    }
 }
 
 /*---------------------------------------------------------*\
@@ -284,6 +310,23 @@ std::vector<GoveeController*>   GoveeController::callbacks;
 std::mutex                     GoveeController::callbacks_mutex;
 std::thread*                    GoveeController::ReceiveThread;
 std::atomic<bool>               GoveeController::ReceiveThreadRun;
+
+bool GoveeController::OpenDiscoverySocket()
+{
+    broadcast_port.sock = INVALID_SOCKET;
+    if(!broadcast_port.udp_client("239.255.255.250", "4001", "4002"))
+    {
+        // net_port can retain a socket after a failed bind or address lookup.
+        if(broadcast_port.sock != INVALID_SOCKET)
+        {
+            broadcast_port.tcp_close();
+            broadcast_port.sock = INVALID_SOCKET;
+        }
+        return false;
+    }
+    broadcast_port.udp_join_multicast_group("239.255.255.250");
+    return true;
+}
 
 void GoveeController::ReceiveBroadcastThreadFunction()
 {

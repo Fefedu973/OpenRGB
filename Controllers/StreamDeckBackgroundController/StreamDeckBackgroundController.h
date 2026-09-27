@@ -25,6 +25,9 @@ struct Options
     unsigned int fps = 20;
     std::string surface_channel; // empty: compatibility LED matrix; nonempty: native image input
     unsigned int surface_stale_ms = 1000;
+    std::string transport = "bridge"; // native: optional in-process Frida Core DLL, no Python/HTTP
+    std::string native_library;
+    std::string native_lock_directory; // same observer lock directory as an existing Python bridge
 };
 
 /* Disabled unless explicitly enabled; never embeds the session credential. */

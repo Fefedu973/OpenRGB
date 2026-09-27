@@ -72,6 +72,7 @@ public:
     static std::thread*                         ReceiveThread;
     static std::atomic<bool>                    ReceiveThreadRun;
 
+    static bool OpenDiscoverySocket();
     static void ReceiveBroadcastThreadFunction();
     static void RegisterReceiveBroadcastCallback(GoveeController* controller_ptr);
     static void UnregisterReceiveBroadcastCallback(GoveeController* controller_ptr);

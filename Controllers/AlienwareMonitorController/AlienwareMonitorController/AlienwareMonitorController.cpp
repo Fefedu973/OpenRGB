@@ -10,7 +10,16 @@ using namespace AlienwareMonitor;
 
 AlienwareMonitorController::AlienwareMonitorController(hid_device* dev_handle, const char* path, const Profile& model)
     : dev(dev_handle), location(path), profile(model) {}
-AlienwareMonitorController::~AlienwareMonitorController() { hid_close(dev); }
+AlienwareMonitorController::~AlienwareMonitorController()
+{
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex);
+        stopping = true;
+    }
+    frame_changed.notify_all();
+    if(worker.joinable()) worker.join();
+    hid_close(dev);
+}
 std::string AlienwareMonitorController::GetLocation() { return "HID: " + location; }
 std::string AlienwareMonitorController::GetName() { return profile.name; }
 const Profile& AlienwareMonitorController::GetProfile() const { return profile; }
@@ -31,7 +40,7 @@ bool AlienwareMonitorController::WriteReport(const std::vector<unsigned char>& r
 bool AlienwareMonitorController::Fail()
 {
     key_index = -1;
-    retry_after = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    retry_after = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     return false;
 }
 
@@ -60,7 +69,9 @@ bool AlienwareMonitorController::SelectKey()
     for(unsigned int attempt = 0; attempt < OEMKeys().size(); ++attempt)
     {
         const unsigned int index = (profile.preferred_key + attempt) % OEMKeys().size();
-        if(Authenticate(index) && WriteReport(probe))
+        const bool authenticated = Authenticate(index);
+        if(authenticated) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        if(authenticated && WriteReport(probe))
         {
             key_index = static_cast<int>(index);
             return true;
@@ -117,10 +128,90 @@ bool AlienwareMonitorController::SendColor(unsigned char mask, unsigned char r, 
     {
         if(key_index < 0 && !SelectKey()) return false;
         /* A fresh challenge is required before each color, not just once at open. */
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
         if(!Authenticate(static_cast<unsigned int>(key_index))) return Fail();
         std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
     if(!WriteReport(ColorReport(profile.transport, mask, r, g, b))) return Fail();
     next_write = std::chrono::steady_clock::now() + std::chrono::milliseconds(profile.delay_ms);
     return true;
+}
+
+void AlienwareMonitorController::SubmitColors(const std::vector<Color>& colors)
+{
+    if(colors.empty() || colors.size() != profile.zones.size()) return;
+    {
+        std::lock_guard<std::mutex> lock(frame_mutex);
+        if(stopping) return;
+        latest_colors = colors;
+        if(!worker.joinable()) worker = std::thread(&AlienwareMonitorController::Run, this);
+    }
+    frame_changed.notify_one();
+}
+
+void AlienwareMonitorController::Run()
+{
+    using Clock = std::chrono::steady_clock;
+    const auto heartbeat = std::chrono::seconds(2);
+    const auto interval = std::chrono::milliseconds(profile.delay_ms);
+    const size_t count = profile.zones.size();
+    std::vector<Color> sent(count);
+    std::vector<bool> valid(count, false);
+    std::vector<Clock::time_point> sent_at(count);
+    size_t cursor = 0;
+    auto ready_at = Clock::now() + interval;
+    std::unique_lock<std::mutex> lock(frame_mutex);
+    while(!stopping)
+    {
+        const auto now = Clock::now();
+        if(now < ready_at)
+        {
+            /* Notifications replace the mailbox but never bypass USB pacing. */
+            frame_changed.wait_until(lock, ready_at);
+            continue;
+        }
+        if(latest_colors.empty())
+        {
+            frame_changed.wait(lock);
+            continue;
+        }
+        size_t selected = count;
+        auto wake_at = now + heartbeat;
+        for(size_t offset = 0; offset < count; ++offset)
+        {
+            const size_t i = (cursor + offset) % count;
+            if(!valid[i] || sent[i] != latest_colors[i] || now - sent_at[i] >= heartbeat)
+            {
+                selected = i;
+                break;
+            }
+            wake_at = std::min(wake_at, sent_at[i] + heartbeat);
+        }
+        if(selected == count)
+        {
+            frame_changed.wait_until(lock, wake_at);
+            continue;
+        }
+        const Color color = latest_colors[selected];
+        unsigned char mask = 0;
+        for(size_t i = 0; i < count; ++i)
+            if(latest_colors[i] == color) mask |= profile.zones[i].mask;
+        cursor = (selected + 1) % count;
+        lock.unlock();
+        const bool success = SendColor(mask, color[0], color[1], color[2]);
+        lock.lock();
+        const auto completed = Clock::now();
+        ready_at = completed + (success ? interval : std::chrono::milliseconds(2000));
+        if(success)
+        {
+            for(size_t i = 0; i < count; ++i)
+                if(mask & profile.zones[i].mask)
+                {
+                    sent[i] = color;
+                    sent_at[i] = completed;
+                    valid[i] = true;
+                }
+        }
+        else std::fill(valid.begin(), valid.end(), false);
+    }
 }

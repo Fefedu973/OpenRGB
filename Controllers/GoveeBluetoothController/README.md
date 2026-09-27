@@ -5,9 +5,13 @@ and `h6159-classic-v1` profiles. It uses C++/WinRT directly from OpenRGB. No Pyt
 process, loopback bridge, cloud service or LAN color fallback is involved.
 
 The implementation is based on the independently established packet/state
-behavior in the companion below. **This C++ port has offline tests; it has not
-yet been validated against hardware.** Existing Python/SignalRGB hardware
-validation does not establish that this new transport works on a given PC.
+behavior in the companion below. Native tests on 27 September 2026 validated
+initial connection, RGB acquisition and restoration on three H6008 bulbs and
+one H6159 strip. **H6008 reconnection in the same process remains unreliable:**
+a second authentication can receive no notifications despite a successful CCCD
+subscription. Initial hardware success does not establish reliable recovery
+after a radio interruption. The bounded comparisons are documented in
+[the reconnection probe](tests/RECONNECT-PROBE.md).
 
 ## Build and offline validation
 
@@ -36,8 +40,9 @@ brightness scaling, static RGB/white restoration, orphan-mode recovery and
 failed recovery readback, reconnects, repeated-color suppression, external OFF,
 H6159 owned blackouts and ordered resume, original raw brightness and secondary
 RGB flag restoration, unsupported modes, AES128 known answer with independently
-checked RC4 tail, and 256 synthetic encrypted packet round trips. GATT behavior
-and timing still require a controlled native hardware test.
+checked RC4 tail, and 256 synthetic encrypted packet round trips. Native hardware
+observations apply to the tested units; neither these tests nor nominal
+intervals are optical frame-rate measurements.
 
 ## Configure explicit devices
 
@@ -65,10 +70,11 @@ devices to control. A rescan/restart is needed after changing this file.
   check, and `key_file`, an absolute file path containing the private 16-byte
   communication key as 32 hexadecimal digits (surrounding whitespace allowed).
   A shared top-level `key_file` in the private JSON is also accepted.
-- H6159 accepts `power_on_acquire` (default `false`). If enabled, only its first
-  acquisition may turn an initially OFF strip ON; color is preloaded first.
-  An initial black frame defers that explicitly opted-in ON until nonzero RGB.
-  H6008 rejects this option because its established profile does not own power.
+- `power_on_acquire`: optional boolean, default **`true` for H6008** and
+  **`false` for H6159**. Its first acquisition may turn an initially OFF device
+  ON; mode/color are preloaded first. An initial black frame defers that ON
+  until effective RGB becomes nonzero. Set it to `false` to preserve initial
+  OFF. Later manual OFF is respected, including after a connection retry.
 
 The key is never part of an OpenRGB setting, SDK controller descriptor, source
 file, example or log. Private config and key paths must be absolute; files are
@@ -92,10 +98,35 @@ per second, not promised optical rates. Identical frames are suppressed.
 
 Connections begin on the first submitted frame. Every reconnect fetches both
 services and characteristics with `BluetoothCacheMode::Uncached` and verifies
-the required notification/write properties. Notifications use a bounded inbox
+the required notification/write properties. H6159 FW 1.07.02 is a measured
+exception: its characteristic may advertise only WriteWithoutResponse/read,
+while its successful command/status path uses ATT WriteWithResponse. The
+H6159 profile accepts either writable property and still sends WriteWithResponse;
+this exception is not applied to other profiles or non-writable characteristics.
+
+A client-owned `GattSession` is retained with `MaintainConnection=true` until
+disconnect. After discovery, Active status is awaited with a bounded deadline;
+disconnect first attempts CCCD None (at most 250 ms of polling), revokes its
+notification callback, and permits up to 100 ms of interruptible settling
+before closing service objects. It then releases maintenance and closes the
+session. The settling interval follows Bleak's documented WinRT cleanup
+workaround. Both waits obey shutdown/restoration cancellation; synchronous
+Windows `Close` itself has no caller-enforceable time limit. This follows the
+WinRT lifetime pattern used by Bleak. Microsoft also documents that uncached
+discovery itself can initiate a connection, so absence of a retained session
+was a lifecycle difference, not proof of the observed radio failures.
+Notifications use a bounded inbox
 whose lifetime is independent of the controller. Invalid checksums, lengths
 and unrelated responses cannot satisfy a query. All asynchronous calls and
 response waits are bounded and observe shutdown cancellation.
+
+H6159 discovery enumerates the configured device's complete uncached service
+table and requires exactly one matching Govee UUID. This addresses the observed
+filtered query returning Success with zero entries; the complete-table path
+subsequently passed native command/readback/restoration tests. A transport
+already connected/authenticated by a caller is
+reused for the initial snapshot and acquisition rather than disconnected and
+authenticated a second time.
 
 H6008 authenticates with E701/E702 (one retry for the first E701 reply), then
 checks the exact AA14 Wi-Fi identity before any mode/color write. It sends the
@@ -103,22 +134,45 @@ established mode05 realtime packets. The first restorable mode0D response is
 preserved exactly, including white-temperature fields. If the device was left
 in mode05 by a crashed/rebooted owner, the explicitly submitted RGB establishes
 a **new verified static baseline**. It is not the unknown color from before
-that reboot. Unknown scenes fail closed. This profile never changes power or
-hardware brightness; OpenRGB brightness scales RGB, and externally OFF bulbs
-pause until they are switched ON externally.
+that reboot. Unknown scenes fail closed. By default, first acquisition of an
+OFF bulb prepares mode05 and the current scaled RGB before sending Power ON.
+Initial black or zero brightness defers that ON. It is not repeated on every
+frame/reconnect: an externally switched OFF bulb subsequently pauses until
+switched ON externally. If this acquisition owned the initial OFF-to-ON
+transition, release restores OFF before the original mode. A bulb already ON
+is not power-owned by OpenRGB. Hardware brightness is never changed; OpenRGB
+brightness scales RGB. This acquisition policy has fake-radio regression
+coverage and passed the native initial-acquisition tests on the three bulbs.
 
 H6159 uses plain mode02 RGB packets and WriteWithResponse, preserving the full
 supported mode payload, alternate RGB flag, raw brightness and initial power.
+Every color uses ATT WriteWithResponse. Application-level AA05 readback checks
+the first RGB of every connection, every forced preload before ON, and the
+last sent RGB every 1.5 seconds (including when the color is static). Intermediate
+animation frames do not each add an AA05 request. The periodic check occurs
+before the next color write so an unexpected mode is not hidden by that write.
 Black RGB or brightness0 switches the strip OFF only after confirming it was
 ON. Only an OFF owned by this blackout permits automatic resume; its newest
 RGB/brightness is written and checked before switching ON. An independently
 switched-off strip is left OFF. This is one RGB color for the entire strip,
 not addressable LEDs and not an anti-fade protocol.
 
+The H6159 native sequence submitted 63 frames including a 60-color animation
+segment in approximately 12.154 s (about 4.94 animation updates/s), compared
+with about 3.65/s when every color queried AA05. Restoration of power, raw
+brightness and the complete supported mode payload was verified. A separate
+H6008 sequence completed 60 animation updates in 4.969 s (about 12.1/s) and
+verified those three restoration fields. These are transport/test timings,
+not measurements of LED refresh or guarantees for another Windows adapter.
+
 Recoverable failures reconnect after 1 second; after three consecutive failed
 steps the backoff is 30 seconds. A successful step clears that failure count.
 The original snapshot persists across reconnects. Logs report meaningful state
 changes and bounded errors, without dumping authentication packets.
+Timeout diagnostics identify only the expected command/prefix and counts of
+received, invalid-checksum or unrelated notifications. GATT failures report
+their numeric communication status. No key, nonce, identity payload or address
+is included in these diagnostic details.
 
 On normal controller destruction the render thread shuts down, the worker
 stops accepting frames and attempts restoration on its existing connection
@@ -140,6 +194,12 @@ is reported rather than represented as a successful reset.
 - [Microsoft C++/WinRT asynchronous operations](https://learn.microsoft.com/en-us/windows/apps/develop/cpp-winrt/concurrency-2)
   explains operation status, cancellation and bounded waits. This worker polls
   status before `GetResults`, never calls an unbounded `.get()`.
+- [Bleak's WinRT client](https://github.com/hbldh/bleak/blob/develop/bleak/backends/winrt/client.py)
+  retains `GattSession`, requests `maintain_connection` and waits for its Active
+  state after service discovery. The locally installed client was also compared.
+- [Microsoft GATT connection behavior](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/gatt-client)
+  distinguishes maintaining a session from connection attempts triggered by
+  uncached discovery or attribute I/O.
 
 No Elgato/NVIDIA binaries, private Govee keys, device addresses or captures are
 part of this controller.

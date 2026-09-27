@@ -4,6 +4,9 @@
 
 namespace GoveeBluetooth
 {
+Session::Session(Profile profile_, Transport& transport_) :
+    Session(profile_, transport_, profile_ == Profile::H6008) {}
+
 Session::Session(Profile profile_, Transport& transport_, bool power_on_acquire_) :
     profile(profile_), transport(transport_), power_on_acquire(power_on_acquire_) {}
 
@@ -26,7 +29,9 @@ void Session::SetPower(bool on)
 void Session::Initialize(const Frame& frame, uint64_t now_ms)
 {
     state = "connecting";
-    transport.Connect(); // GATT validation, E7 + AA14 occur before all mode/color writes.
+    // A diagnostic or caller may already own an authenticated transport. Reuse
+    // it while still taking this Session's snapshot before all state writes.
+    if(!transport.Connected()) transport.Connect();
     state = "initializing";
     ObservePower(transport.Query(1)[2]);
     last_power_ms = now_ms;
@@ -70,22 +75,50 @@ void Session::Initialize(const Frame& frame, uint64_t now_ms)
     else if(profile == Profile::H6159 && !RestorableMode(profile, mode))
         throw std::runtime_error("H6159 was switched to an unsupported scene during reconnect");
 
+    realtime_started = false;
+    sent = false;
+    if(!acquired && profile == Profile::H6008 && power_on_acquire && power == 0)
+        acquire_on_pending = true;
     bool black = frame.rgb == RGB{{0, 0, 0}} || frame.brightness == 0;
     if(!acquired && profile == Profile::H6159 && power_on_acquire && black && power == 0)
         blackout_owned = true; // Explicit first-acquisition ON is deferred until RGB becomes nonzero.
     if(!acquired && profile == Profile::H6159 && power_on_acquire && !black && power == 0)
     {
-        SendClassicColor(frame, true);
+        SendClassicColor(frame, true, now_ms);
         SetPower(true);
     }
     acquired = true;
-    realtime_started = false;
-    sent = false;
     state = "ready";
 }
 
-void Session::SendClassicColor(const Frame& frame, bool force)
+void Session::SendRealtimeColor(const Frame& frame, bool force)
 {
+    if(!realtime_started)
+    {
+        modified = true;
+        transport.Send(StartRealtime());
+        realtime_started = true;
+    }
+    if(force || !sent || !(frame == last_frame))
+    {
+        modified = true;
+        transport.Send(Realtime(ScaledRGB(frame)));
+        last_frame = frame;
+        sent = true;
+    }
+}
+
+void Session::SendClassicColor(const Frame& frame, bool force, uint64_t now_ms)
+{
+    const bool confirm_current = force || !sent;
+    if(!confirm_current && now_ms - last_color_check_ms >= 1500u)
+    {
+        // Check the last delivered color before overwriting it. This also runs
+        // for a static frame, detecting an externally changed/ignored mode.
+        if(!MatchesColor(profile, transport.Query(5), last_frame.rgb))
+            throw std::runtime_error("H6159 periodic RGB readback mismatch");
+        last_color_check_ms = now_ms;
+    }
     if(force || !sent || frame.brightness != last_frame.brightness)
     {
         modified = true;
@@ -95,8 +128,15 @@ void Session::SendClassicColor(const Frame& frame, bool force)
     {
         modified = true;
         transport.Send(Color(profile, frame.rgb));
+    }
+    // ATT WriteWithResponse acknowledges each write. Keep an application-mode
+    // readback on the first color of every connection and before any forced
+    // power-on preload, rather than serializing a status exchange per frame.
+    if(confirm_current)
+    {
         if(!MatchesColor(profile, transport.Query(5), frame.rgb))
             throw std::runtime_error("H6159 RGB readback mismatch");
+        last_color_check_ms = now_ms;
     }
     last_frame = frame;
     sent = true;
@@ -105,11 +145,23 @@ void Session::SendClassicColor(const Frame& frame, bool force)
 void Session::Step(const Frame& frame, uint64_t now_ms)
 {
     if(frame.brightness > 100) throw std::invalid_argument("Govee BLE brightness exceeds 100");
-    if(!transport.Connected()) Initialize(frame, now_ms);
+    if(!acquired || !transport.Connected()) Initialize(frame, now_ms);
     if(now_ms - last_power_ms >= (profile == Profile::H6008 ? 500u : 1500u))
     {
         ObservePower(transport.Query(1)[2]);
         last_power_ms = now_ms;
+    }
+    if(profile == Profile::H6008 && acquire_on_pending)
+    {
+        if(power != 0 || external_off)
+            acquire_on_pending = false; // An external ON takes precedence; we did not own it.
+        else if(ScaledRGB(frame) != RGB{{0, 0, 0}})
+        {
+            SendRealtimeColor(frame, true); // Stage mode and newest RGB while OFF.
+            acquire_power_owned = true; // Retain ownership if ON succeeds but its ACK is lost.
+            SetPower(true);
+            acquire_on_pending = false;
+        }
     }
     if(profile == Profile::H6159)
     {
@@ -128,7 +180,7 @@ void Session::Step(const Frame& frame, uint64_t now_ms)
         }
         if(blackout_owned)
         {
-            SendClassicColor(frame, true); // Preload color/level while OFF, avoid stale white flash.
+            SendClassicColor(frame, true, now_ms); // Preload color/level while OFF, avoid stale white flash.
             SetPower(true);
             blackout_owned = false;
             external_off = false;
@@ -145,20 +197,9 @@ void Session::Step(const Frame& frame, uint64_t now_ms)
     }
     if(profile == Profile::H6008)
     {
-        if(!realtime_started)
-        {
-            modified = true;
-            transport.Send(StartRealtime());
-            realtime_started = true;
-        }
-        if(!sent || !(frame == last_frame))
-        {
-            transport.Send(Realtime(ScaledRGB(frame)));
-            last_frame = frame;
-            sent = true;
-        }
+        SendRealtimeColor(frame, false);
     }
-    else SendClassicColor(frame, false);
+    else SendClassicColor(frame, false, now_ms);
     state = "streaming";
 }
 
@@ -167,7 +208,15 @@ void Session::Release()
     state = "releasing";
     if(snapshot_valid && modified && transport.Connected())
     {
-        // H6008 never claims power or brightness; preserve external controls.
+        // Only an initially OFF H6008 explicitly turned ON by this acquisition
+        // is ours to switch back OFF. Pre-existing ON/external OFF remain alone.
+        // Restore OFF before the old mode to avoid briefly showing a stale color.
+        if(profile == Profile::H6008 && acquire_power_owned)
+        {
+            const uint8_t current = transport.Query(1)[2];
+            if(current > 1) throw std::runtime_error("Unknown Govee BLE power state at release");
+            if(current != original_power) SetPower(original_power != 0);
+        }
         transport.Send(RestoreMode(original_mode));
         if(profile == Profile::H6159)
         {

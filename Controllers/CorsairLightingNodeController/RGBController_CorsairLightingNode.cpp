@@ -311,6 +311,7 @@ void RGBController_CorsairLightingNode::SetupZones()
     | Clear any existing color/LED configuration            |
     \*-----------------------------------------------------*/
     leds.clear();
+    leds_channel.clear();
     colors.clear();
     zones.resize(CORSAIR_LIGHTING_NODE_NUM_CHANNELS);
 

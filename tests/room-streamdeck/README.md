@@ -2,7 +2,7 @@
 
 Ce contrôleur C++ accepte une **image native FrameSurface de dimensions variables**, par exemple 800 × 600, ou une matrice **80×50, soit 4000 pixels RGB**, pour les effets OpenRGB existants. Il redimensionne la source par interpolation bilinéaire vers 480×272, la découpe dans l'ordre de `/layout`, puis envoie quinze tuiles 72×72 BGRA opaques à `POST /frame`. Il préserve le détail spatial à l'intérieur de chaque touche. La matrice reste le mode compatible par défaut ; une image native ne transite pas par ses 4000 LED.
 
-Le contrôleur est natif C++, mais le compositeur Elgato reste fourni par **l'application Stream Deck et le pont local Python/Frida existant**. Il n'écrit aucun paquet HID/USB et ne remplace aucun bouton, action, icône ou profil. Le pont reste limité aux versions et au MK.2 autorisés par ses propres contrôles de hash. Aucune nouvelle compatibilité Elgato n'est revendiquée.
+Le compositeur utilise **l'application Stream Deck et un hook Frida contrôlé par version**. Deux transports existent : `bridge` garde le serveur Python/HTTP précédent ; `native` embarque Frida Core dans OpenRGB et supprime ce serveur. Il n'écrit aucun paquet HID/USB et ne remplace aucun bouton, action, icône ou profil. La compatibilité reste limitée au MK.2 et aux trois binaires autorisés. Voir [compilation et configuration du transport natif](../../Native/StreamDeckCompositor/README.md).
 
 ## Interface d'image générique
 
@@ -36,7 +36,7 @@ Le producteur et ce contrôleur utilisent le même canal [FrameSurface](../../Fr
 
 Lorsque `StreamDeckBackground.enabled` vaut `true`, ce fork supprime automatiquement la détection USB **Elgato Stream Deck MK.2** afin que le détecteur HID ne concurrence pas le compositeur Elgato. Cette garde est intégrée au détecteur MK.2 ; elle ne ferme pas une autre instance d'OpenRGB déjà lancée. Désactiver le client Stream Deck de SignalRGB avant le premier essai OpenRGB. Un seul émetteur doit contrôler le fond : l'API existante n'attribue pas un bail distinct à chaque client HTTP partageant son token.
 
-Le pont doit être démarré par son lanceur existant. OpenRGB ne lance pas Python, n'attache pas Frida et ne modifie pas les tâches Windows. Si `/health` n'est pas prêt, si le token change, si le serveur est absent ou si le format natif diffère, le worker attend/revalide au lieu d'utiliser un chemin USB de secours.
+En transport `bridge`, le pont doit être démarré par son lanceur existant. En transport `native`, OpenRGB charge sa DLL facultative et effectue lui-même l'attachement unique gardé ; aucun Python, serveur ou token n'est nécessaire. Aucun mode ne modifie les tâches Windows. Si le compositeur n'est pas prêt, le worker attend et revalide. La première composition naturelle reste nécessaire : une horloge minute peut retarder ce démarrage, et une page sans rafraîchissement peut rester en attente.
 
 ## Cadence et arrêt
 
@@ -62,4 +62,6 @@ Les scénarios vérifient le désarmement par défaut, les bornes, le BGRA/alpha
 
 Les tests vérifient également le contrat générique, la conservation de l'allocation partagée, 150 soumissions coalescées, les transformations affines, la priorité du bail, l'expiration pendant une connexion lente, le repli vers la dernière matrice et l'exclusivité du canal externe.
 
-Fichiers ajoutés sous GPL-2.0-or-later, conformément au fork OpenRGB. Le format de l'API vient des fichiers locaux `SignalRGB-Local-Bridges/streamdeck/bridge/background_api.py`, `canvas_transport.py`, `API-NOTES.md` et `full-canvas-design.md`. Aucune clé, ressource propriétaire Elgato ou copie du hook n'est incluse dans ce contrôleur. Le transport HTTP utilise la dépendance cpp-httplib déjà présente dans OpenRGB et conserve sa licence dans son dossier d'origine.
+Fichiers ajoutés sous GPL-2.0-or-later, conformément au fork OpenRGB. Le format de l'API vient des fichiers locaux `SignalRGB-Local-Bridges/streamdeck/bridge/background_api.py`, `canvas_transport.py`, `API-NOTES.md` et `full-canvas-design.md`. Aucun secret ni ressource propriétaire Elgato n'est inclus. La copie inchangée du hook GPL et les notices Frida sont dans `Native/StreamDeckCompositor`. Le transport HTTP utilise la dépendance cpp-httplib déjà présente dans OpenRGB et conserve sa licence dans son dossier d'origine.
+
+Le 27 septembre 2026, le harness natif a découvert automatiquement le compositeur et envoyé 126 images 800 × 600 en huit secondes, avec 126 acquittements et 1890 peintures sur les quinze touches, zéro erreur, puis restauration acquittée et détachement. L'utilisateur a confirmé visuellement le fond animé et les quinze icônes correctes. Le débit réel était proche de 16 images/s pour un plafond de 20 ; ce résultat matériel est distinct des tests HTTP simulés ci-dessus.

@@ -5,8 +5,10 @@
 #pragma once
 #include <hidapi.h>
 #include <chrono>
+#include <condition_variable>
 #include <mutex>
 #include <string>
+#include <thread>
 #include "AlienwareMonitorProtocol.h"
 
 class AlienwareMonitorController
@@ -20,6 +22,10 @@ public:
     const AlienwareMonitor::Profile& GetProfile() const;
     bool Initialize();
     bool SendColor(unsigned char mask, unsigned char r, unsigned char g, unsigned char b);
+    using Color = std::array<unsigned char, 3>;
+    /* Rendering never queues USB commands: the worker samples the latest frame
+       at the monitor's own rate and rotates fairly between dirty zones. */
+    void SubmitColors(const std::vector<Color>& colors);
 private:
     hid_device* dev;
     std::string location;
@@ -33,4 +39,10 @@ private:
     bool Authenticate(unsigned int index);
     bool SelectKey();
     bool Fail();
+    void Run();
+    std::mutex frame_mutex;
+    std::condition_variable frame_changed;
+    std::thread worker;
+    bool stopping = false;
+    std::vector<Color> latest_colors;
 };

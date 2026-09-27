@@ -19,3 +19,22 @@ Sources and boundaries:
 `generate_profiles.py MATRIX.json` optionally regenerates the profile/detector tables from the separately supplied evidence matrix. `extract_fixtures.py ARCHIVE_DIRECTORY` optionally regenerates fixtures from the original local analyses and captures; it is not needed for normal offline tests.
 
 The AW3426DW default interval is now100ms as a conservative response to a later user report of lag. The earlier20ms setting and successful USB acknowledgements are historical evidence only. The new100ms interval has not yet been optically validated, and OpenRGB has not been run on the monitor.
+# Scheduling and live SignalRGB parity
+
+The worker regression also verifies that rendering 10,000 replacement frames
+does not enqueue 10,000 USB writes. Dirty zones rotate fairly, equal colors
+share a mask, repeated colors are skipped for two seconds, and shutdown wakes
+the worker before closing the HID handle. These checks use link-time HID stubs.
+
+To additionally compare against an installed set of the three SignalRGB plugins:
+
+```powershell
+python tests/alienware-monitor/run.py C:\path\to\SignalRGB\Plugins
+```
+
+The optional comparison runs the actual JavaScript packet builders in a Node VM
+with no hardware API. It compares all 23 VID/PID profiles, auth flags, intervals,
+zone masks, 2,496 color reports and 320 responses across all five OEM keys against
+the compiled C++ implementation. This checks protocol equivalence, not physical
+validation of monitors that are not present. AW3225QF retains the upstream native
+initialization sequence; the common color packet parity is tested separately.

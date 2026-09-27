@@ -6,6 +6,14 @@
 
 namespace GoveeBluetooth
 {
+bool HasRequiredWriteProperty(Profile profile, bool write, bool write_without_response)
+{
+    // H6159 FW1.07.02 advertises only WriteWithoutResponse yet its validated
+    // command/status path requires ATT WriteWithResponse. This is a profile
+    // exception, not permission to use arbitrary non-writable characteristics.
+    return profile == Profile::H6159 ? (write || write_without_response) : write_without_response;
+}
+
 Packet MakePacket(uint8_t prefix, uint8_t command, std::initializer_list<uint8_t> payload)
 {
     if(payload.size() > 17) throw std::invalid_argument("Govee BLE payload exceeds 17 bytes");

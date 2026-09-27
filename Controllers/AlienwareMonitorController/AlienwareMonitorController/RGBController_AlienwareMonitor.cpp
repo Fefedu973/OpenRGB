@@ -73,24 +73,13 @@ void RGBController_AlienwareMonitor::SetupZones()
 
 void RGBController_AlienwareMonitor::DeviceUpdateLEDs()
 {
-    if(leds.empty()) return;
-    bool equal = true;
-    for(unsigned int i = 1; i < leds.size(); ++i) equal &= colors[i] == colors[0];
-    if(equal)
-    {
-        unsigned char red = RGBGetRValue(colors[0]);
-        unsigned char grn = RGBGetGValue(colors[0]);
-        unsigned char blu = RGBGetBValue(colors[0]);
-        if(!controller->SendColor(controller->GetProfile().AllZones(), red, grn, blu))
-            LOG_DEBUG("[%s] Color transfer skipped or failed", name.c_str());
-    }
-    else
-    {
-        for(unsigned int led_idx = 0; led_idx < leds.size(); led_idx++)
-        {
-            DeviceUpdateSingleLED(led_idx);
-        }
-    }
+    std::vector<AlienwareMonitorController::Color> frame;
+    frame.reserve(leds.size());
+    for(size_t i = 0; i < leds.size(); ++i)
+        frame.push_back({static_cast<unsigned char>(RGBGetRValue(colors[i])),
+                         static_cast<unsigned char>(RGBGetGValue(colors[i])),
+                         static_cast<unsigned char>(RGBGetBValue(colors[i]))});
+    controller->SubmitColors(frame);
 }
 
 void RGBController_AlienwareMonitor::DeviceUpdateZoneLEDs(int zone)
@@ -101,11 +90,7 @@ void RGBController_AlienwareMonitor::DeviceUpdateZoneLEDs(int zone)
 void RGBController_AlienwareMonitor::DeviceUpdateSingleLED(int led)
 {
     if(led < 0 || static_cast<size_t>(led) >= leds.size()) return;
-    unsigned char red = RGBGetRValue(colors[led]);
-    unsigned char grn = RGBGetGValue(colors[led]);
-    unsigned char blu = RGBGetBValue(colors[led]);
-    if(!controller->SendColor(leds[led].value, red, grn, blu))
-        LOG_DEBUG("[%s] Color transfer skipped or failed", name.c_str());
+    DeviceUpdateLEDs();
 }
 
 void RGBController_AlienwareMonitor::DeviceUpdateMode()

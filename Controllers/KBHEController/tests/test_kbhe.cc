@@ -25,6 +25,13 @@ struct hid_device_
     bool wrong_chunk_size = false;
     bool prepend_stale_chunk = false;
     bool numbered_reply = false;
+    bool restore_token = false;
+    unsigned char previous_mode = 2;
+    bool force_restore_token_lost = false;
+    bool fail_enable_off_once = false;
+    bool bad_snapshot_size = false;
+    bool corrupt_restore_readback = false;
+    Frame live{};
     int closed = 0;
 };
 
@@ -42,12 +49,41 @@ extern "C" int HID_API_CALL hid_write(hid_device* dev, const unsigned char* data
         else {reply[2]=1;reply[4]=dev->cap_count;reply[5]=3;reply[6]=60;reply[7]=7;reply[8]=0x7F;}
         break;
     case 0x60:reply[2]=dev->enabled;break;
-    case 0x61:reply[2]=dev->enabled=data[3];break;
+    case 0x61:
+        if(data[3]==0 && dev->fail_enable_off_once) { dev->fail_enable_off_once=false; reply[1]=1; reply[2]=dev->enabled; }
+        else reply[2]=dev->enabled=data[3];
+        break;
     case 0x6E:reply[2]=dev->mode;break;
-    case 0x6F:reply[2]=dev->mode=data[3];break;
-    case 0x76:reply[2]=dev->mode=2;break;
+    case 0x6F:
+        // Firmware settings.c: setting the current mode is a no-op. Only a
+        // non-live -> live transition creates the previous-effect token.
+        if(dev->mode != data[3]) {
+            if(data[3]==7) {dev->previous_mode=dev->mode;dev->restore_token=true;}
+            else dev->restore_token=false;
+            dev->mode=data[3];
+        }
+        reply[2]=dev->mode;break;
+    case 0x76:
+        if(dev->force_restore_token_lost)dev->restore_token=false;
+        if(dev->restore_token){dev->mode=dev->previous_mode;dev->restore_token=false;}
+        else reply[1]=1;
+        reply[2]=dev->mode;break;
+    case 0x68: {
+        const auto offset=static_cast<std::size_t>(data[3])*60;
+        assert(offset<FRAME_BYTES);
+        const auto count=std::min<std::size_t>(60,FRAME_BYTES-offset);
+        reply[2]=data[3];reply[3]=static_cast<unsigned char>(dev->bad_snapshot_size ? 1 : count);
+        std::copy_n(dev->live.begin()+offset,count,reply.begin()+4);
+        if(dev->corrupt_restore_readback) reply[4]^=1;
+        if(dev->prepend_stale_chunk) {
+            auto stale=reply;stale[2]=99;stale[4]^=0xFF;
+            dev->replies.emplace_back(stale.begin(),stale.end());
+        }
+        break;
+    }
     case 0x6A:
         assert(dev->mode==7);reply[2]=data[3];reply[3]=dev->wrong_chunk_size?1:data[4];
+        std::copy_n(data+5,data[4],dev->live.begin()+static_cast<std::size_t>(data[3])*60);
         if(dev->prepend_stale_chunk){auto stale=reply;stale[2]=99;dev->replies.emplace_back(stale.begin(),stale.end());}
         break;
     default:assert(false);
@@ -146,8 +182,59 @@ static void SerializedFrames()
     assert(chunks.size()==10);for(std::size_t i=0;i<chunks.size();++i){assert(chunks[i][3]==i%5);assert(chunks[i][5]==chunks[i<5?0:5][5]);}
     assert(chunks[0][5]!=chunks[5][5]);
 }
+static void ExistingLiveSnapshotAndRestore()
+{
+    hid_device_ device;device.mode=7;device.enabled=0;device.live=Gradient();device.prepend_stale_chunk=true;
+    const Frame initial=device.live;
+    KBHEController controller(&device,"mock","unit",true);
+    assert(controller.Probe());assert(controller.EnterDirectMode());
+    assert(Count(device,0x68)==5);assert(!device.restore_token);
+    Frame different{};different.fill(173);assert(controller.SendFrame(different));
+    assert(device.live==different);
+    assert(controller.RestoreHardware());
+    assert(device.mode==7&&device.enabled==0&&device.live==initial);
+    assert(controller.GetRestorationResult()=="initial_live_image_restored_prior_effect_unknown");
+    assert(controller.GetLastError().empty());
+    assert(Count(device,0x68)==10&&Count(device,0x76)==1&&Count(device,0x6F)==1);
+    assert(controller.RestoreHardware());assert(Count(device,0x76)==1);
+}
+static void RestoreObservedModeAndRetryEnable()
+{
+    hid_device_ device;device.mode=5;device.force_restore_token_lost=true;
+    KBHEController controller(&device,"mock","unit",true);
+    assert(controller.Probe());assert(controller.EnterDirectMode());
+    device.fail_enable_off_once=true;
+    assert(!controller.RestoreHardware());assert(device.mode==5&&device.enabled==1);
+    assert(Count(device,0x76)==1);
+    assert(controller.RestoreHardware());assert(device.mode==5&&device.enabled==0);
+    assert(controller.GetRestorationResult()=="observed_hardware_mode_restored");
+    assert(Count(device,0x76)==1); // only enable restoration is retried
+}
+static void RejectIncompleteInitialLiveSnapshot()
+{
+    hid_device_ device;device.mode=7;device.bad_snapshot_size=true;
+    KBHEController controller(&device,"mock","unit",true);
+    assert(controller.Probe());assert(!controller.EnterDirectMode());
+    assert(Count(device,0x6F)==0&&Count(device,0x61)==0&&Count(device,0x6A)==0);
+    assert(controller.GetLastError().find("snapshot chunk size")!=std::string::npos);
+    device.bad_snapshot_size=false;
+    assert(controller.EnterDirectMode());assert(controller.RestoreHardware());
+}
+static void LiveRestorationRequiresExactReadback()
+{
+    hid_device_ device;device.mode=7;device.live=Gradient();
+    KBHEController controller(&device,"mock","unit",true);
+    assert(controller.Probe());assert(controller.EnterDirectMode());
+    device.corrupt_restore_readback=true;
+    assert(!controller.RestoreHardware());
+    assert(controller.GetLastError().find("readback differs")!=std::string::npos);
+    device.corrupt_restore_readback=false;
+    assert(controller.RestoreHardware());assert(device.live==Gradient());
+}
 int main()
 {
     FramingAndLayout();ProbeAndRestore();FaultsAndExternalMode();SerializedFrames();
-    std::cout<<"KBHE framing, 82-key geometry, capabilities, legacy identity, matching ACKs, bounded failures, mode restoration and serialized frames: PASS\n";
+    ExistingLiveSnapshotAndRestore();RestoreObservedModeAndRetryEnable();RejectIncompleteInitialLiveSnapshot();
+    LiveRestorationRequiresExactReadback();
+    std::cout<<"KBHE framing, 82-key geometry, capabilities, legacy identity, matching ACKs, bounded failures, mode restoration, orphan-live snapshot/readback, retry enable and serialized frames: PASS\n";
 }

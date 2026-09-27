@@ -4,6 +4,12 @@ Audit du 27 septembre 2026, sans accès matériel, sans exécution d’OpenRGB e
 
 Les chemins de sources ci-dessous sont relatifs à la racine OpenRGB.
 
+Correction de périmètre : l'utilisateur a précisé **G915 + G502 X PLUS**, et non
+G512. Le G915 est absent physiquement. La ligne G512 ci-dessous reste une trace
+de l'audit initial, sans constituer une demande actuelle. L'enquête et les fixes
+de coexistence sont dans `logitech-coexistence.md`; les essais matériels plus
+récents sont dans `validation-2026-09-27.md`.
+
 | Appareil de l’inventaire courant | Couverture trouvée | Preuve dans les sources | Travail restant / limite |
 |---|---|---|---|
 | Logitech G502 X PLUS, récepteur `046D:C547`, modèle négocié `C095/4099`, 8 LED | Contrôleur unifié HID++ 2.0, déjà moderne | `Controllers/LogitechController/LogitechControllerDetect.cpp:1774` : détecteurs génériques VID Logitech, page `FF00` usage 2 et autres transports ; `:948` et `:1011` : identité et table d’appairage ; `:677` : la liste d’exclusions vers les pilotes anciens n’inclut pas `4099`. | Pas de nouveau pilote à créer sur la seule base du PID du récepteur. Vérifier à l’exécution les fonctions RGB et le nombre de zones annoncés par le périphérique appairé. Le PID `C547` seul ne signifie pas « G915 » : le nom d’une ancienne constante est partagé entre plusieurs récepteurs. |

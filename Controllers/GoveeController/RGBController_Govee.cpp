@@ -139,6 +139,12 @@ void RGBController_Govee::SetupZones()
     strip.leds_count            = hw.led_count;
     strip.leds_min              = hw.led_count;
     strip.leds_max              = hw.led_count;
+    // These describe the sampling geometry only. The model's fixed number of
+    // controllable segments and the existing complete-frame protocol stay intact.
+    strip.flags                = ZONE_FLAG_MANUALLY_CONFIGURABLE_NAME
+                               | ZONE_FLAG_MANUALLY_CONFIGURABLE_TYPE
+                               | ZONE_FLAG_MANUALLY_CONFIGURABLE_MATRIX_MAP
+                               | ZONE_FLAG_MANUALLY_CONFIGURABLE_SEGMENTS;
 
     switch(hw.layout)
     {
@@ -258,6 +264,7 @@ void RGBController_Govee::SetupZones()
 
 void RGBController_Govee::DeviceConfigureZone(int zone_idx)
 {
+    if(zone_idx < 0 || (size_t)zone_idx >= zones.size()) return;
     if(zones[zone_idx].type == ZONE_TYPE_MATRIX)
     {
         return;

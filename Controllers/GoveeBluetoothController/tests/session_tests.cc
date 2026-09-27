@@ -13,10 +13,12 @@ struct Fake : Transport
 {
     bool connected = false;
     bool fail_color_readback = false;
+    bool drop_color_writes = false;
     uint8_t power = 1, brightness = 151;
     Packet mode;
     unsigned int connects = 0;
     std::vector<Packet> writes;
+    std::vector<uint8_t> queries;
     explicit Fake(Profile profile) : mode(MakePacket(0xAA, 5,
         {static_cast<uint8_t>(profile == Profile::H6008 ? 13 : 2), 12, 34, 56})) {}
     bool Connected() const override { return connected; }
@@ -29,11 +31,13 @@ struct Fake : Transport
         else if(p[1] == 4) brightness = p[2];
         else if(p[1] == 5)
         {
+            if(drop_color_writes) return;
             mode = p; mode[0] = 0xAA; mode[19] ^= 0x33 ^ 0xAA;
         }
     }
     Packet Query(uint8_t command) override
     {
+        queries.push_back(command);
         if(command == 1) return MakePacket(0xAA, 1, {power});
         if(command == 4) return MakePacket(0xAA, 4, {brightness});
         if(command == 5)
@@ -66,10 +70,35 @@ int main()
     assert(ParseAddress("02:00:00:00:00:01") == 0x020000000001ULL);
     assert(ParseKey("000102030405060708090a0b0c0d0e0f\n")[15] == 15);
     check("strict configuration and packet domains");
+    assert(HasRequiredWriteProperty(Profile::H6159,false,true));
+    assert(HasRequiredWriteProperty(Profile::H6159,true,false));
+    assert(!HasRequiredWriteProperty(Profile::H6159,false,false));
+    assert(HasRequiredWriteProperty(Profile::H6008,false,true));
+    assert(!HasRequiredWriteProperty(Profile::H6008,true,false));
+    check("H6159 writable-property quirk accepted without changing ATT write-request policy");
     assert(ScaledRGB({{{255, 50, 1}}, 0}) == (RGB{{0,0,0}}));
     assert(ScaledRGB({{{200, 100, 50}}, 50}) == (RGB{{100,50,25}}));
     assert(BrightnessRaw(100) == 255 && BrightnessRaw(50) == 128);
     check("brightness scaling and real zero");
+    {
+        Fake radio(Profile::H6008);radio.Connect();
+        const auto before=radio.mode;
+        // Caller has already authenticated and queried the device. This Session
+        // must snapshot/init, but must not disconnect and authenticate again.
+        Session session(Profile::H6008,radio);
+        session.Step({{{11,22,33}},100},0);
+        assert(radio.connects==1 && session.State()=="streaming");
+        assert(radio.writes.size()==2 && radio.writes[0]==StartRealtime());
+        session.Release();assert(radio.mode==before && radio.power==1 && !radio.connected);
+        check("preconnected H6008 still snapshots/initializes and restores without a second connection");
+    }
+    {
+        Fake radio(Profile::H6159);radio.Connect();const auto before=radio.mode;
+        Session session(Profile::H6159,radio);
+        session.Step({{{44,55,66}},80},0);session.Release();
+        assert(radio.connects==1 && radio.mode==before && radio.brightness==151);
+        check("preconnected H6159 snapshots original raw state before its first write");
+    }
     {
         Fake radio(Profile::H6008);
         radio.mode = MakePacket(0xAA, 5, {13,12,34,56,0x11,0xF8,0xAA,0x55});
@@ -111,13 +140,59 @@ int main()
         check("unknown H6008 scene rejected before mode or color write");
     }
     {
-        Fake radio(Profile::H6008);radio.power=0;Session session(Profile::H6008,radio);
+        Fake radio(Profile::H6008);radio.power=0;Session session(Profile::H6008,radio,false);
         session.Step({{{1,2,3}},100},0);assert(session.State()=="paused_off" && radio.writes.empty());
         radio.power=1;session.Step({{{1,2,3}},100},501);assert(session.State()=="streaming");
         radio.power=0;session.Step({{{4,5,6}},100},1002);const auto count=radio.writes.size();
         session.Step({{{7,8,9}},100},2000);assert(radio.writes.size()==count);
         session.Release();assert(radio.power==0);
         check("H6008 external OFF respected across subsequent frames and release");
+    }
+    {
+        Fake radio(Profile::H6008);radio.power=0;const auto before=radio.mode;
+        Session session(Profile::H6008,radio);
+        session.Step({{{40,60,80}},50},0);
+        assert(radio.writes.size()==3 && radio.writes[0]==StartRealtime());
+        assert(radio.writes[1]==Realtime({{20,30,40}}));
+        assert(radio.writes[2]==MakePacket(0x33,1,{1}) && radio.power==1);
+        const auto release_begin=radio.writes.size();session.Release();
+        assert(radio.writes[release_begin]==MakePacket(0x33,1,{0}));
+        assert(radio.power==0 && radio.brightness==151 && radio.mode==before);
+        assert(std::none_of(radio.writes.begin(),radio.writes.end(),[](const Packet& p){return p[1]==4;}));
+        check("H6008 default acquisition preloads mode05 and scaled RGB before ON; restores owned initial OFF");
+    }
+    {
+        Fake radio(Profile::H6008);radio.power=0;Session session(Profile::H6008,radio);
+        session.Step({{{0,0,0}},100},0);assert(radio.writes.empty() && radio.power==0);
+        session.Step({{{200,100,50}},0},100);assert(radio.writes.empty());
+        session.Step({{{1,1,1}},1},200);assert(radio.writes.empty()); // Rounded effective RGB remains black.
+        session.Step({{{20,40,60}},50},300);assert(radio.power==1);
+        assert(radio.writes[0]==StartRealtime() && radio.writes[1]==Realtime({{10,20,30}}));
+        assert(radio.writes[2]==MakePacket(0x33,1,{1}));session.Release();assert(radio.power==0);
+        check("H6008 initial black/brightness zero defers ON until effective RGB is nonzero");
+    }
+    {
+        Fake radio(Profile::H6008);radio.power=0;Session session(Profile::H6008,radio);
+        session.Step({{{7,8,9}},100},0);assert(radio.power==1);
+        radio.power=0;session.Step({{{10,20,30}},100},501);
+        const auto count=radio.writes.size();session.Step({{{40,50,60}},100},1002);
+        radio.Disconnect();session.Step({{{70,80,90}},100},2000);
+        assert(radio.power==0 && session.State()=="paused_off" && radio.writes.size()==count);
+        session.Release();assert(radio.power==0);
+        assert(std::count_if(radio.writes.begin(),radio.writes.end(),[](const Packet& p){return p[1]==1 && p[2]==1;})==1);
+        check("H6008 acquisition ON is one-shot; manual OFF survives frames, reconnect and release");
+    }
+    {
+        Fake radio(Profile::H6008);radio.power=0;Session session(Profile::H6008,radio);
+        session.Step({{{0,0,0}},100},0);radio.power=1;
+        session.Step({{{50,60,70}},100},501);session.Release();
+        assert(radio.power==1 && std::none_of(radio.writes.begin(),radio.writes.end(),[](const Packet& p){return p[1]==1;}));
+        check("external ON during deferred acquisition is not owned or undone by H6008");
+    }
+    {
+        Fake radio(Profile::H6159);radio.power=0;Session session(Profile::H6159,radio);
+        session.Step({{{1,2,3}},100},0);assert(radio.power==0 && radio.writes.empty());
+        check("H6159 retains its opt-in-only acquisition policy");
     }
     {
         Fake radio(Profile::H6008);Session session(Profile::H6008,radio);Frame frame{{{4,5,6}},100};
@@ -133,6 +208,47 @@ int main()
         session.Step({{{7,8,9}},75},0);session.Release();
         assert(radio.mode==before && radio.brightness==151 && radio.power==1);
         check("H6159 secondary-color flag and raw brightness restored exactly");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{1,2,3}},70},0);
+        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==2); // Snapshot + first color.
+        for(unsigned index=1;index<15;++index)
+            session.Step({{{static_cast<uint8_t>(index+1),2,3}},70},index*100);
+        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==2);
+        session.Step({{{40,50,60}},70},1500);
+        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==3);
+        assert(std::count(radio.queries.begin(),radio.queries.end(),1)==2); // Power remains periodic.
+        session.Step({{{40,50,60}},70},2999);
+        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==3);
+        session.Step({{{40,50,60}},70},3000);
+        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==4); // Static colors are checked too.
+        radio.Disconnect();session.Step({{{40,50,60}},70},3100);
+        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==6); // Reconnect snapshot + first color.
+        session.Release();
+        check("H6159 first/reconnect RGB confirmation plus 1500ms periodic checks, not per frame");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{1,2,3}},100},0);
+        radio.mode=MakePacket(0xAA,5,{2,99,88,77});
+        const auto writes=radio.writes.size();
+        Reject([&]{session.Step({{{8,9,10}},100},1500);});
+        assert(radio.writes.size()==writes); // Detect before overwriting the unexpected mode.
+        check("H6159 periodic mismatch detected before a new color write");
+    }
+    {
+        Fake radio(Profile::H6159);radio.drop_color_writes=true;Session session(Profile::H6159,radio);
+        Reject([&]{session.Step({{{1,2,3}},100},0);});
+        check("H6159 first color still requires application-level RGB confirmation");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{0,0,0}},100},0);assert(radio.power==0);
+        radio.drop_color_writes=true;
+        Reject([&]{session.Step({{{20,30,40}},60},100);});
+        assert(radio.power==0); // Never turn on an unconfirmed preload.
+        check("H6159 forced blackout resume confirms RGB before switching ON");
     }
     {
         Fake radio(Profile::H6159);Session session(Profile::H6159,radio);

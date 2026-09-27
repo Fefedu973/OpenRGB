@@ -84,7 +84,9 @@ Makefile*
 !tests/room-streamdeck/Build-Tests.cmd
 !tests/room-large-device-ui/Build-Tests.cmd
 !tools/room-build/Build-Room.ps1
+!tools/room-diagnostics/build-native.cmd
 !tests/room-plugin-images/Build-Tests.cmd
+!tests/room-govee-lan/Build-Tests.cmd
 *.qm
 *.prl
 

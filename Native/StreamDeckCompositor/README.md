@@ -6,7 +6,7 @@ Ce module optionnel Windows x64 remplace le serveur Python/HTTP par **Frida Core
 
 Le test physique **antérieur au correctif des cases vides**, sur une page peuplée, a produit 126 images 800 × 600 sur huit secondes : 126 notifications acquittées, 1890 peintures couvrant les quinze touches, zéro erreur, environ 16 images/s réelles pour un plafond de 20. La latence d'acquittement avait un p95 de 7 ms. La restauration normale a été acquittée et le détachement terminé. L'utilisateur a également confirmé visuellement le fond animé natif et les quinze icônes correctes. Ces mesures ne validaient pas les cases sans action : leur défaut a été signalé ensuite sur une autre page.
 
-### Cases sans action : cache encodé identifié, validation visuelle à renouveler
+### Cases sans action : correctif de cache confirmé visuellement
 
 Le slot d'animation natif ignorait les coordonnées absentes de sa table d'actions,
 même si notre notification demandait les quinze indices. Le correctif utilise,
@@ -50,8 +50,28 @@ nouvelle fonction native appelée ne sont nécessaires.
 Les tests simulent désormais cette décision d'upload, y compris un JPEG vide
 déjà en cache : peindre une QImage seule ne suffit plus à les faire réussir.
 Ils vérifient aussi les quinze destinations sans bundle et le maintien de
-l'identité de cache lors de la restauration. **Le correctif de cache reste à
-valider sur les touches physiques et lors d'une navigation entre pages.**
+l'identité de cache lors de la restauration. Le correctif `c05a830e`, DLL SHA256
+`88607FDF9DEE48ADD03D57C8F6F11BEA0D95063B5E9C6D8B2DEE0B419E12E7EA`,
+a ensuite été confirmé sur le matériel : **« Oui, les cases vides sont animées
+aussi »**. Le statut de cette session indiquait une couverture de quinze fonds,
+dont six cases vides, sans erreur ; les ACK progressaient de 120 à 150, environ
+14,6 images/s, avec un p95 d'acquittement de 13 ms. Ces nombres décrivent cette
+fenêtre de test, pas une garantie de cadence universelle.
+
+Le premier démarrage après installation avait néanmoins échoué avec un timeout
+RPC générique : le dernier statut valide à 3019 ms n'avait pas encore découvert
+le compositeur. Ce statut ancien n'exclut pas qu'une composition soit survenue
+ensuite. La fermeture/reprise d'Elgato seule a permis la reconnexion avec le même
+processus OpenRGB et la même DLL. La cause précise du premier blocage reste
+**non démontrée** ; aucun rollback ni hausse arbitraire de délai n'a été utilisé.
+
+Le correctif de diagnostic ultérieur ajoute méthode RPC, PID, durée monotone,
+délai configuré et détachement au message d'erreur. Il ne change pas le délai
+RPC de 1500 ms, la limite du rendu Qt, les gardes ou l'interdiction de réessayer
+un PID fautif. La validation synthétique vérifie le message d'un timeout de
+100 ms et une restauration/déconnexion normale, sans viser Elgato. Ce diagnostic
+est une modification de source séparée : la DLL 88607FDF validée ci-dessus ne
+le contient pas encore.
 
 `lastFrameCoverage` rapporte les nombres `rendered`, `injected`, `empty` et
 `actions` **pour la dernière image**, avec son numéro et son état `restore`.

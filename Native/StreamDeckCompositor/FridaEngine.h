@@ -48,6 +48,7 @@ class Engine {
     gulong message_handler=0,detach_handler=0;
     std::thread::id owner=std::this_thread::get_id();
     std::uint64_t next_id=0;
+    unsigned target_pid=0;
     bool loaded=false;
     std::atomic<bool> detached{false};
     RpcResponse response;
@@ -73,7 +74,7 @@ public:
     {if(std::this_thread::get_id()!=owner)throw std::runtime_error("Native compositor handle used from another thread");}
     void Open(unsigned pid,const std::string& source)
     {
-        CheckThread();GError* error=nullptr;
+        CheckThread();target_pid=pid;GError* error=nullptr;
         ROOM_SD_TRACE("manager");
         manager=frida_device_manager_new();
         ROOM_SD_TRACE("get device");
@@ -100,7 +101,10 @@ public:
     }
     Json Call(const char* method,const Json& arguments=Json::array(),const void* data=nullptr,std::size_t size=0,unsigned timeout_ms=1500)
     {
-        CheckThread();Pump();
+        CheckThread();
+        const auto started=Clock::now();
+        try {
+        Pump();
         if(!script || !loaded || detached)throw std::runtime_error("Compositor session is disconnected");
         const bool diagnostics=std::string(method)=="status";
         const auto fault=response.Read().fault;
@@ -121,7 +125,16 @@ public:
             if(detached || Clock::now()>=deadline)break;
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }while(true);
-        throw std::runtime_error("Native compositor RPC timed out or detached");
+        throw std::runtime_error(detached ? "Session detached while awaiting RPC" : "Reply deadline expired");
+        }catch(const std::exception& error) {
+            const auto elapsed=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-started).count();
+            // Method names are internal constants. Never include RPC arguments,
+            // frame bytes, a screen image or a user profile in this diagnostic.
+            throw std::runtime_error("Native compositor RPC method="+std::string(method)
+                +" pid="+std::to_string(target_pid)+" elapsed_ms="+std::to_string(elapsed)
+                +" deadline_ms="+std::to_string(timeout_ms)+" detached="+(detached ? "true" : "false")
+                +": "+error.what());
+        }
     }
     bool Restore(std::string& detail)
     {

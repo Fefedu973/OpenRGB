@@ -67,7 +67,13 @@ stall(){return new Promise(()=>{});},stop(){armed=false;return {stopped:true,res
         std::this_thread::sleep_for(std::chrono::milliseconds(120));
         Check(engine.Call("status")["armed"]==false,"Image lease expired");
         const auto timeout_start=room_sd::Clock::now();
-        Reject([&]{engine.Call("stall",room_sd::Json::array(),nullptr,0,100);});
+        std::string timeout_detail;
+        try { engine.Call("stall",room_sd::Json::array(),nullptr,0,100); }
+        catch(const std::exception& error) { timeout_detail=error.what(); }
+        Check(timeout_detail.find("method=stall")!=std::string::npos,"Timeout names the RPC");
+        Check(timeout_detail.find("pid="+std::to_string(child.process.dwProcessId))!=std::string::npos,"Timeout identifies target PID");
+        Check(timeout_detail.find("elapsed_ms=")!=std::string::npos && timeout_detail.find("deadline_ms=100")!=std::string::npos,"Timeout records actual elapsed time and configured bound");
+        Check(timeout_detail.find("detached=false")!=std::string::npos && timeout_detail.find("Reply deadline expired")!=std::string::npos,"Timeout distinguishes detach from no reply");
         Check(room_sd::Clock::now()-timeout_start<std::chrono::seconds(1),"Bounded RPC timeout");
         std::string detail;Check(engine.Restore(detail),"Synthetic restoration acknowledged");
         Reject([&]{engine.Call("fault");});

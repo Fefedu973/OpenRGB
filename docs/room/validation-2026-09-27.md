@@ -170,3 +170,13 @@ The old callback reproduces a ready/null result in the regression test. The fix
 passes 2,000 concurrent 16 KB responses plus a real Frida synthetic-child test
 with twenty 311,040-byte frames, bounded timeout, restoration and close. This
 establishes the race fix, not the cause of every prior live warning.
+
+The final installed package was started again through the Windows task. Its
+SDK7 server answered a same-profile reload in 1.703 seconds and remained usable.
+A subsequent pair of snapshots again showed 25 changing LED buffers, both image
+output descriptors and zero unconfigured zones. The initial four BLE devices
+reached streaming within 14 seconds. Observed H6008 link closure is now reported
+as a closed session rather than waiting for both reply timeouts. These checks
+are runtime/software evidence; the latest full-scene optical check has not been
+confirmed by the user. Generated inventory profiles are archived outside the
+daily profile directory.

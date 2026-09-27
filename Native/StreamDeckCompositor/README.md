@@ -152,6 +152,17 @@ Le SDK expose `stalled`, `queuedStalls`, `queueRecoveries`, `pendingAgeMs`,
 `pendingEntered` et une phase bornée à `queued`/`rendering` ; aucune image ni
 adresse mémoire ne passe dans ces diagnostics.
 
+Installation du correctif `7b7e7290` : après relance d'OpenRGB, Elgato est resté
+dans le même processus. La découverte naturelle a repris en environ quatorze
+secondes, puis 199 images supplémentaires ont été acquittées pendant une
+fenêtre de vingt secondes (161 à 360), avec quinze touches couvertes, aucune
+erreur et aucun stall. Le p95 d'acquittement était de 8 ms. Le profil utilisateur
+restauré était Full Blanc ; cette mesure prouve le transport et la composition,
+pas un test optique d'animation ni une reproduction physique du retard de trois
+secondes. Les 77 fichiers JSON et les DLL Effects/VisualMap étaient inchangés.
+DLL native installée :
+`CABF6015B8C0C8448226C078001CCD3EB2B953DBB7DA7C5163F62109F1B4D150`.
+
 `lastFrameCoverage` rapporte les nombres `rendered`, `injected`, `empty` et
 `actions` **pour la dernière image**, avec son numéro et son état `restore`.
 L'ACK exige quinze images natives valides et quinze injections ; une restauration

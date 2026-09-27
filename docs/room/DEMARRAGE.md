@@ -40,13 +40,17 @@ connecte et lui envoie ses couleurs ; SignalRGB ne participe plus à ce trajet.
 La configuration et les fichiers du wallpaper existant sont conservés.
 
 La configuration privée préparée sur cette machine est `private/native-configured`.
-La carte **Full Scale** reprend les **101 éléments actifs sur 101** : 111 membres,
-1 120 routes LED, une image native Stream Deck et 512 échantillons de la matrice
+La carte **Full Scale** reprend les **116 éléments actifs sur 116** : 126 membres,
+1 162 routes LED, une image native Stream Deck et 512 échantillons de la matrice
 Wallpaper Engine. Les positions, rotations, miroirs et formes personnalisées
-sont conservés, y compris les LED superposées. Les 27 contrôleurs matériels
-utilisent 27 zones configurées et 93 segments. Le wallpaper est un contrôleur
+sont conservés, y compris les LED superposées. Les 28 contrôleurs matériels
+utilisent 28 zones configurées et 108 segments. Le wallpaper est un contrôleur
 réseau distinct. L'original SignalRGB reste intact ; les exports et secrets sont
-privés. La carte Music est disponible séparément, sans activation simultanée.
+privés. La seconde H61A2 a été réintégrée depuis ses 15 morceaux d'origine :
+13 points individuels et deux tronçons de 10 et 19 segments. Un ancien alias
+réseau l'avait fait exclure lors de l'import initial. La carte Music reste
+disponible séparément, sans activation simultanée ; cette réparation concerne
+Full Scale. Voir `govee-recovery-2026-09-27.md` pour le diagnostic.
 
 Les 21 sorties inutilisées des contrôleurs Nollie et Corsair sont explicitement
 configurées à zéro dans `Configuration.json`. La vérification des zones reste

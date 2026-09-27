@@ -13,6 +13,8 @@
 
 #include "RGBController.h"
 #include "GoveeController.h"
+#include "GoveeDirectControl.h"
+#include <condition_variable>
 
 class RGBController_Govee : public RGBController
 {
@@ -33,6 +35,7 @@ public:
 
 private:
     void        UpdateStatic(bool force);
+    void        UpdateLEDsLocked();
 
     GoveeController*                                    controller;
     std::thread*                                        keepalive_thread;
@@ -42,4 +45,9 @@ private:
     unsigned int                                        last_static_brightness;
     bool                                                razer_supported;
     bool                                                static_initialized;
+    GoveeDirectControl                                  direct_control;
+    std::mutex                                          send_mutex;
+    std::atomic<bool>                                   updates_started{false};
+    std::mutex                                          keepalive_wait_mutex;
+    std::condition_variable                             keepalive_wake;
 };

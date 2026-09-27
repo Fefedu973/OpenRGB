@@ -117,7 +117,11 @@ RGBController_Govee::~RGBController_Govee()
 {
     Shutdown();
 
-    keepalive_thread_run = 0;
+    {
+        std::lock_guard<std::mutex> lock(keepalive_wait_mutex);
+        keepalive_thread_run = 0;
+    }
+    keepalive_wake.notify_all();
     keepalive_thread->join();
     delete keepalive_thread;
 
@@ -286,20 +290,35 @@ void RGBController_Govee::DeviceConfigureZone(int zone_idx)
 
 void RGBController_Govee::DeviceUpdateLEDs()
 {
+    std::lock_guard<std::mutex> lock(send_mutex);
+    UpdateLEDsLocked();
+}
+
+void RGBController_Govee::UpdateLEDsLocked()
+{
     if(colors.empty())
     {
         return;
     }
 
+    updates_started.store(true);
     const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-    last_update_time = now;
+    if(modes[active_mode].value == GOVEE_MODE_STATIC)
+    {
+        UpdateStatic(now - last_update_time >= std::chrono::seconds(30));
+        return;
+    }
 
     const unsigned int brightness = modes[active_mode].brightness;
 
     if(razer_supported)
     {
+        const auto actions = direct_control.Next(now, brightness);
+        if(actions.enable) controller->SendRazerEnable();
         controller->SendRazerData(&colors[0], (unsigned int)colors.size());
-        controller->SetBrightness(brightness);
+        if(actions.brightness) controller->SetBrightness(brightness);
+        // Apply the requested frame before waking an initially powered-off strip.
+        if(actions.power_on) controller->SetPower(true);
     }
     else
     {
@@ -335,25 +354,23 @@ void RGBController_Govee::DeviceUpdateSingleLED(int /*led*/)
 
 void RGBController_Govee::DeviceUpdateMode()
 {
+    std::lock_guard<std::mutex> lock(send_mutex);
+    updates_started.store(true);
     if(modes[active_mode].value == GOVEE_MODE_STATIC)
     {
+        direct_control.Reset();
         UpdateStatic(false);
     }
     else if(modes[active_mode].value == GOVEE_MODE_DIRECT)
     {
-        if(razer_supported)
-        {
-            controller->SendRazerEnable();
-        }
-
-        last_update_time = std::chrono::steady_clock::now();
-        DeviceUpdateLEDs();
+        direct_control.Begin(std::chrono::steady_clock::now());
+        UpdateLEDsLocked();
     }
 }
 
 void RGBController_Govee::UpdateStatic(bool force)
 {
-    last_update_time = std::chrono::steady_clock::now();
+    bool sent = false;
 
     const RGBColor color          = modes[active_mode].colors[0];
     const unsigned int brightness = modes[active_mode].brightness;
@@ -363,48 +380,28 @@ void RGBController_Govee::UpdateStatic(bool force)
         controller->SetPower(true);
         controller->SetColor(RGBGetRValue(color), RGBGetGValue(color), RGBGetBValue(color));
         last_static_color       = color;
+        sent = true;
     }
 
     if(force || !static_initialized || (brightness != last_static_brightness))
     {
         controller->SetBrightness(brightness);
         last_static_brightness = brightness;
+        sent = true;
     }
 
+    if(sent) last_update_time = std::chrono::steady_clock::now();
     static_initialized = true;
 }
 
 void RGBController_Govee::KeepaliveThread()
 {
-    while(keepalive_thread_run.load())
+    std::unique_lock<std::mutex> lock(keepalive_wait_mutex);
+    while(!keepalive_wake.wait_for(lock, std::chrono::seconds(1),
+                                  [this] { return !keepalive_thread_run.load(); }))
     {
-        const std::chrono::steady_clock::time_point now = std::chrono::steady_clock::now();
-
-        if((now - last_update_time) > std::chrono::seconds(30))
-        {
-            if(modes[active_mode].value == GOVEE_MODE_STATIC)
-            {
-                UpdateStatic(true);
-            }
-            else if(modes[active_mode].value == GOVEE_MODE_DIRECT)
-            {
-                /*-----------------------------------------------------*\
-                | Direct/per-LED mode has no other periodic refresh -   |
-                | SendRazerEnable() only fires once, at mode entry.     |
-                | Re-assert it here so a long gap between real updates  |
-                | (e.g. idle time between plugin-driven alerts) can't   |
-                | let the device's external-control session time out    |
-                | and fall back to its own firmware default.            |
-                \*-----------------------------------------------------*/
-                if(razer_supported)
-                {
-                    controller->SendRazerEnable();
-                }
-
-                DeviceUpdateLEDs();
-            }
-        }
-
-        std::this_thread::sleep_for(10s);
+        // Queue work through the core worker; never inspect modes/colors or send
+        // UDP from this thread. The worker coalesces this with real RGB updates.
+        if(updates_started.load()) UpdateLEDsInternal();
     }
 }

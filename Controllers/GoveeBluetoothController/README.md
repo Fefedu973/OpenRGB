@@ -48,6 +48,10 @@ checked RC4 tail, and 256 synthetic encrypted packet round trips. Fourteen addit
 authentication tests cover retained-session identity, fresh authentication after
 a simulated reset, lost replies, per-device isolation, wrong-identity refusal,
 cache expiry, bounded eviction and complete transport recreation.
+Eight query tests cover the bounded status-read retry. Ten passive-discovery
+tests cover a cold cache followed by an exact typed open, warm-cache bypass,
+unknown targets/types, shared concurrent callers, owner/waiter cancellation,
+deadlines, radio errors and callbacks after Stop/replacement/destruction.
 Native hardware
 observations apply to the tested units; neither these tests nor nominal
 intervals are optical frame-rate measurements.
@@ -111,6 +115,25 @@ exception: its characteristic may advertise only WriteWithoutResponse/read,
 while its successful command/status path uses ATT WriteWithResponse. The
 H6159 profile accepts either writable property and still sends WriteWithResponse;
 this exception is not applied to other profiles or non-writable characteristics.
+
+On a cold Windows boot, a non-paired device may not yet exist in the system
+cache, causing `FromBluetoothAddressAsync` to return null. The old companion
+primed that cache through passive discovery; the native driver now has the same
+necessary step. Only after a null direct lookup, a process-shared passive watcher
+listens for at most five seconds. Concurrent workers share the scan and its
+recent result; each discovery call has a six-second deadline including waiting
+for the shared scanner. Cancellation is checked at intervals of at most 25 ms.
+Only explicitly configured addresses are retained (at most 16); their observed
+public/random address type is used for one typed lookup. Unknown advertisers
+are discarded, with no auto-pairing, new configuration entry or GATT access.
+Watcher callbacks retain independent state and are generation-checked before
+use; Stop and callback revocation happen before the scan owner returns.
+Successful lookup still passes the normal configured-address, model/GATT and
+H6008 AA14 identity checks. Discovery errors are reported without payloads or
+nearby device identities. A passive scan observed all four configured devices
+after the reported reboot and allowed the old live process to leave its null-
+lookup loop. The new integrated implementation has offline/compile validation;
+full cold-boot hardware validation is a separate step.
 
 A client-owned `GattSession` is retained with `MaintainConnection=true` until
 disconnect. After discovery, Active status is awaited with a bounded deadline;
@@ -243,6 +266,9 @@ is reported rather than represented as a successful reset.
 - [Microsoft GATT connection behavior](https://learn.microsoft.com/en-us/windows/apps/develop/devices-sensors/gatt-client)
   distinguishes maintaining a session from connection attempts triggered by
   uncached discovery or attribute I/O.
+- [Microsoft FromBluetoothAddressAsync](https://learn.microsoft.com/en-us/uwp/api/windows.devices.bluetooth.bluetoothledevice.frombluetoothaddressasync)
+  documents the non-paired/system-cache null result and advertisement watching
+  as a way to populate that cache before opening a device.
 
 No Elgato/NVIDIA binaries, private Govee keys, device addresses or captures are
 part of this controller.

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later
  * Native Windows GATT client. C++/WinRT requires Windows SDK 10.0.19041+.
- * No Python process, UDP bridge, LAN color command or automatic BLE scan.
+ * No Python process, UDP bridge or LAN color command. Passive cache discovery
+ * is bounded and restricted to explicitly configured device identities.
  */
 #ifndef NOMINMAX
 #define NOMINMAX
@@ -12,6 +13,7 @@
 #include <winrt/Windows.Foundation.h>
 #include <winrt/Windows.Foundation.Collections.h>
 #include <winrt/Windows.Devices.Bluetooth.h>
+#include <winrt/Windows.Devices.Bluetooth.Advertisement.h>
 #include <winrt/Windows.Devices.Bluetooth.GenericAttributeProfile.h>
 #include <winrt/Windows.Storage.Streams.h>
 #include "GoveeBluetoothController_Windows.h"
@@ -19,6 +21,7 @@
 #include "GoveeBluetoothAuthentication.h"
 #include "GoveeBluetoothCredentialCache.h"
 #include "GoveeBluetoothQuery.h"
+#include "GoveeBluetoothDiscovery.h"
 #include "LogManager.h"
 #endif
 #include <algorithm>
@@ -40,6 +43,7 @@ namespace GoveeBluetooth
 #ifndef GOVEE_BLE_CRYPTO_TEST
 using namespace winrt::Windows::Foundation;
 using namespace winrt::Windows::Devices::Bluetooth;
+using namespace winrt::Windows::Devices::Bluetooth::Advertisement;
 using namespace winrt::Windows::Devices::Bluetooth::GenericAttributeProfile;
 using namespace winrt::Windows::Storage::Streams;
 using Clock = std::chrono::steady_clock;
@@ -134,6 +138,63 @@ struct TransportProbeOptions
     bool auth_write_response = false;
 };
 
+class WindowsPassiveScan final : public PassiveDiscovery::Scan
+{
+public:
+    explicit WindowsPassiveScan(PassiveDiscovery::Observation observe) : error(std::make_shared<std::atomic<int>>(-1))
+    {
+        try
+        {
+            watcher = BluetoothLEAdvertisementWatcher();
+            watcher.ScanningMode(BluetoothLEScanningMode::Passive);
+            received_token = watcher.Received([observe](const auto&, const BluetoothLEAdvertisementReceivedEventArgs& args)
+            {
+                try
+                {
+                    const auto type = args.BluetoothAddressType();
+                    if(type == BluetoothAddressType::Public) observe(args.BluetoothAddress(), 0);
+                    else if(type == BluetoothAddressType::Random) observe(args.BluetoothAddress(), 1);
+                }
+                catch(...) { /* Never leak an exception through a Windows callback. */ }
+            });
+            received_registered = true;
+            auto status = error;
+            stopped_token = watcher.Stopped([status](const auto&, const BluetoothLEAdvertisementWatcherStoppedEventArgs& args)
+            {
+                status->store(static_cast<int>(args.Error()));
+            });
+            stopped_registered = true;
+            watcher.Start();
+        }
+        catch(...) { Stop(); throw; }
+    }
+    ~WindowsPassiveScan() override { Stop(); }
+    std::optional<int> Error() const override
+    {
+        const auto code = error->load();
+        return code < 0 ? std::nullopt : std::optional<int>{code};
+    }
+private:
+    void Stop() noexcept
+    {
+        if(!watcher) return;
+        try { watcher.Stop(); } catch(...) {}
+        if(received_registered) { try { watcher.Received(received_token); } catch(...) {} received_registered = false; }
+        if(stopped_registered) { try { watcher.Stopped(stopped_token); } catch(...) {} stopped_registered = false; }
+        watcher = nullptr;
+    }
+    BluetoothLEAdvertisementWatcher watcher{nullptr};
+    winrt::event_token received_token{}, stopped_token{};
+    bool received_registered = false, stopped_registered = false;
+    std::shared_ptr<std::atomic<int>> error;
+};
+
+static std::shared_ptr<PassiveDiscovery> ProcessDiscovery()
+{
+    static const auto discovery = std::make_shared<PassiveDiscovery>();
+    return discovery;
+}
+
 static std::shared_ptr<CredentialCache> ProcessCredentials()
 {
     // Each transport keeps shared ownership. Static teardown cannot destroy the
@@ -163,15 +224,17 @@ public:
         configuration(configuration_), stop(stop_), inbox(std::make_shared<Inbox>()), probe_options(probe_options_),
         authentication(configuration_.wifi_mac),
         credential_cache(configuration_.profile == Profile::H6008 ? ProcessCredentials() : nullptr),
-        credential_scope(ConfigurationScope(configuration_))
+        credential_scope(ConfigurationScope(configuration_)), discovery(ProcessDiscovery())
     {
         if(credential_cache)
             if(auto candidates = credential_cache->Take(credential_scope, CredentialTime()))
                 authentication.ImportCandidates(*candidates);
+        discovery->Register(configuration.address);
     }
     ~WindowsTransport() override
     {
         Disconnect();
+        discovery->Unregister(configuration.address);
         SecureZeroMemory(session_key.data(), session_key.size());
     }
 
@@ -219,8 +282,20 @@ public:
         inbox = std::make_shared<Inbox>();
         try
         {
-            device = Wait(BluetoothLEDevice::FromBluetoothAddressAsync(configuration.address));
-            if(!device) throw std::runtime_error("Configured Govee BLE device is unavailable");
+            device = OpenConfiguredDevice(*discovery, configuration.address,
+                [this](std::optional<uint8_t> type)
+                {
+                    if(!type) return Wait(BluetoothLEDevice::FromBluetoothAddressAsync(configuration.address));
+                    auto resolved = Wait(BluetoothLEDevice::FromBluetoothAddressAsync(configuration.address,
+                        *type == 0 ? BluetoothAddressType::Public : BluetoothAddressType::Random));
+                    if(resolved) LOG_INFO("[Govee BLE] %s: resolved configured device from passive discovery", configuration.name.c_str());
+                    return resolved;
+                },
+                [this](PassiveDiscovery::Observation observe)
+                {
+                    LOG_INFO("[Govee BLE] %s: populating cold Windows cache with bounded passive discovery", configuration.name.c_str());
+                    return std::make_unique<WindowsPassiveScan>(std::move(observe));
+                }, [this] { return Interrupted(); });
             if(device.BluetoothAddress() != configuration.address)
                 throw std::runtime_error("Govee BLE address does not match configuration");
             if(configuration.profile == Profile::H6159)
@@ -555,6 +630,7 @@ private:
     H6008Authentication authentication;
     std::shared_ptr<CredentialCache> credential_cache;
     CredentialScope credential_scope;
+    std::shared_ptr<PassiveDiscovery> discovery;
 };
 
 Controller::Controller(Configuration configuration_) : configuration(std::move(configuration_))

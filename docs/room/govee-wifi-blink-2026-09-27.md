@@ -23,9 +23,21 @@ keepalive resends the current color frame, including for a static Direct color.
 This does not add a device-status acknowledgement or claim to repair every possible
 firmware/network failure.
 
-Production-method tests cover prolonged continuous output, one-frame-per-second
-maintenance, brightness changes, startup retries, and reacquisition after an actual
-output gap. See [LAN test instructions](../../tests/room-govee-lan/README.md).
+All 21 production-method assertions passed, covering prolonged continuous output,
+one-frame-per-second maintenance, brightness changes, startup retries, and
+reacquisition after an actual output gap. The same test fails against the previous
+policy at the continuous-output/no-reactivation assertion. The complete Windows
+core was rebuilt after regenerating its header dependencies, packaged and started
+through the existing Windows task. See
+[LAN test instructions](../../tests/room-govee-lan/README.md).
 
-Post-installation packet verification and the user's visual result are recorded
-when available. The original SignalRGB layout and Bluetooth transport are unchanged.
+The post-installation 24-second capture contains 1,681 valid B0 color frames across
+all nine LAN devices, with **zero B1 activations, brightness commands, ON/OFF
+commands, black frames or malformed frames**. The capture reported no dropped
+packets. This verifies the running binary's outgoing traffic; it does not prove
+delivery at the bulbs or that the physical blink has disappeared. Visual
+confirmation was requested and is pending at this revision.
+
+Runtime SDK validation also found all 30 controllers, both H61A2 strips, 28 changing
+color buffers and both native image outputs. The original SignalRGB layout,
+OpenRGB Full Scale placements and Bluetooth transport are unchanged.

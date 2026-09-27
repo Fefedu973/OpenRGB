@@ -1,0 +1,9 @@
+# Physical keyboard input service
+
+`run.py` compiles the actual Windows implementation with MSVC and tests only an injected backend. It never registers for real input or opens a device. Checks cover independent listeners, no backlog at acquisition, 250 ms expiry, 64-event cap, make/break repeat suppression per device, removal/reset, conflict/failure recovery, concurrent first/last listeners and concurrent publishing/reading.
+
+The service is owned by the core, exposed through the optional `room_input::PluginAPI` (version 1). API5 is unchanged. Each plugin API owns its tokens and releases them at destruction. No effect active means no Raw Input registration. Only physical Set 1 make scans and device identity are retained in volatile bounded memory, not translated text. No file/network logging of input is performed.
+
+On Windows one message-only window receives usage 01/06 with `INPUTSINK | DEVNOTIFY`; no `NOLEGACY` flag and no hooks/injection. Existing keyboard registration in this process causes acquisition to fail. Cleanup removes only a registration still pointing to our window. Other components must cooperate: Windows offers no atomic compare-and-register operation if an unrelated library registers concurrently. Device removal or resume clears held-state/history; the last listener joins the worker before its callbacks are destroyed. The message loop checks shutdown every 50 ms and between bounded message batches.
+
+Primary API contracts: [RegisterRawInputDevices](https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-registerrawinputdevices), [RAWKEYBOARD](https://learn.microsoft.com/en-us/windows/win32/api/winuser/ns-winuser-rawkeyboard), [WM_INPUT cleanup](https://learn.microsoft.com/en-us/windows/win32/inputdev/wm-input). Real keyboard behavior is not validated by this synthetic test.

@@ -25,6 +25,16 @@ RGBController_Virtual::~RGBController_Virtual()
     Shutdown();
 }
 
+bool RGBController_Virtual::GetInputPoints(unsigned zone, std::vector<room_input::InputPoint>& points) const
+{
+    std::shared_lock<std::shared_mutex> lock(image_sink_mutex);
+    points.clear();
+    auto* mapping = dynamic_cast<room_input::RGBControllerInputMappingInterface*>(image_sink);
+    if(!mapping || !mapping->GetInputPoints(zone, points) || points.size() > room_input::MaxInputPoints)
+    { points.clear(); return false; }
+    return true;
+}
+
 void RGBController_Virtual::AttachImageInterface(room_image::RGBControllerImageInterface* sink)
 {
     std::unique_lock<std::shared_mutex> lock(image_sink_mutex);

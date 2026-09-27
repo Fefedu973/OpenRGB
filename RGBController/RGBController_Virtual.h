@@ -15,8 +15,9 @@
 
 #include "RGBController.h"
 #include "FrameRouting/RGBControllerImageInterface.h"
+#include "FrameRouting/RGBControllerInputMappingInterface.h"
 
-class RGBController_Virtual : public RGBController, public room_image::RGBControllerImageInterface
+class RGBController_Virtual : public RGBController, public room_image::RGBControllerImageInterface, public room_input::RGBControllerInputMappingInterface
 {
 public:
     RGBController_Virtual(RGBController_Setup* setup);
@@ -29,6 +30,8 @@ public:
                                         const room_image::Mapping& mapping, unsigned lease_ms) override;
     bool                GetImagePreview(unsigned zone, std::shared_ptr<const room_image::Frame>& frame,
                                         room_image::Mapping& mapping) const override;
+
+    bool GetInputPoints(unsigned zone, std::vector<room_input::InputPoint>& points) const override;
 
     void                DeviceConfigureZone(int zone_idx);
 

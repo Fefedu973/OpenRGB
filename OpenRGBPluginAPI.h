@@ -19,16 +19,26 @@
 #include "SettingsManager.h"
 #include "FrameRouting/OpenRGBImagePluginAPI.h"
 #include <memory>
+#include <mutex>
+#include <unordered_set>
+#include "FrameRouting/OpenRGBInputPluginAPI.h"
+namespace room_input { class KeyboardInputService; }
 
 struct OpenRGBVirtualControllerState;
 
-class OpenRGBPluginAPI : public OpenRGBPluginAPIInterface, public room_image::PluginAPI
+class OpenRGBPluginAPI : public OpenRGBPluginAPIInterface, public room_image::PluginAPI, public room_input::PluginAPI
 {
 public:
     OpenRGBPluginAPI();
     ~OpenRGBPluginAPI() override;
     unsigned                                ImageAPIVersion() const override { return 1; }
     bool                                    AttachImageInterface(RGBControllerInterface* controller, room_image::RGBControllerImageInterface* sink) override;
+
+    unsigned InputAPIVersion() const override { return 1; }
+    std::uint64_t AcquireKeyboardInput() override;
+    void ReleaseKeyboardInput(std::uint64_t token) override;
+    std::vector<room_input::KeyboardEvent> ReadKeyboardInput(std::uint64_t token) override;
+    std::string KeyboardInputStatus() const override;
 
     /*-----------------------------------------------------*\
     | LogManager APIs                                       |
@@ -100,6 +110,9 @@ public:
     std::vector<RGBController*>             GetRegisteredVirtualControllers() const;
 
 private:
+    std::shared_ptr<room_input::KeyboardInputService> input_service;
+    mutable std::mutex input_tokens_mutex;
+    std::unordered_set<std::uint64_t> input_tokens;
     std::shared_ptr<OpenRGBVirtualControllerState> virtual_controller_state;
     LogManager *                            log_manager;
     PluginManagerInterface *                plugin_manager;

@@ -10,6 +10,7 @@
 \*---------------------------------------------------------*/
 
 #include "OpenRGBPluginAPI.h"
+#include "Input/KeyboardInputService.h"
 #include "RGBController_Dummy.h"
 #include "RGBController_Virtual.h"
 #include <algorithm>
@@ -169,7 +170,8 @@ void CloseVirtualState(const std::shared_ptr<VirtualState>& state)
 // END VIRTUAL_CONTROLLER_LIFECYCLE
 
 OpenRGBPluginAPI::OpenRGBPluginAPI()
-    : virtual_controller_state(std::make_shared<OpenRGBVirtualControllerState>())
+    : input_service(room_input::KeyboardInputService::SharedInstance()),
+      virtual_controller_state(std::make_shared<OpenRGBVirtualControllerState>())
 {
     log_manager         = ResourceManager::get()->GetLogManager();
     plugin_manager      = ResourceManager::get()->GetPluginManager();
@@ -180,8 +182,33 @@ OpenRGBPluginAPI::OpenRGBPluginAPI()
 
 OpenRGBPluginAPI::~OpenRGBPluginAPI()
 {
+    {
+        std::lock_guard<std::mutex> lock(input_tokens_mutex);
+        for(const auto token : input_tokens) input_service->Release(token);
+        input_tokens.clear();
+    }
     CloseVirtualState(virtual_controller_state);
 }
+
+std::uint64_t OpenRGBPluginAPI::AcquireKeyboardInput()
+{
+    std::lock_guard<std::mutex> lock(input_tokens_mutex);
+    const auto token = input_service->Acquire();
+    if(token) input_tokens.insert(token);
+    return token;
+}
+void OpenRGBPluginAPI::ReleaseKeyboardInput(std::uint64_t token)
+{
+    std::lock_guard<std::mutex> lock(input_tokens_mutex);
+    if(input_tokens.erase(token)) input_service->Release(token);
+}
+std::vector<room_input::KeyboardEvent> OpenRGBPluginAPI::ReadKeyboardInput(std::uint64_t token)
+{
+    std::lock_guard<std::mutex> lock(input_tokens_mutex);
+    return input_tokens.count(token) ? input_service->Read(token) : std::vector<room_input::KeyboardEvent>{};
+}
+std::string OpenRGBPluginAPI::KeyboardInputStatus() const
+{ return input_service->Status(); }
 
 /*---------------------------------------------------------*\
 | LogManager APIs                                           |

@@ -844,3 +844,8 @@ message("HID Hotplug: Enabled")
 } else {
 message("HID Hotplug: Disabled")
 }
+
+# Core-owned optional physical keyboard input (no plugin-owned Raw Input registration).
+HEADERS += Input/KeyboardInputService.h FrameRouting/OpenRGBInputPluginAPI.h FrameRouting/RGBControllerInputMappingInterface.h
+SOURCES += Input/KeyboardInputService.cpp
+win32:LIBS += -luser32

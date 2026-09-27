@@ -35,7 +35,9 @@ public:
 class SegmentedCapture : public RGBController
 {
 public:
-    std::atomic<unsigned> updates{0};
+    std::atomic<unsigned> updates{0},color_batches{0},direct_colors{0};
+    std::mutex batch_mutex;
+    std::shared_ptr<const room_color::ColorFrame> received_batch;
     SegmentedCapture()
     {
         name="DLL Synthetic Segments";vendor="Room tests";serial="dll-segments";location="test-only-segments";
@@ -48,6 +50,12 @@ public:
     }
     ~SegmentedCapture(){Shutdown();}
     void DeviceUpdateLEDs()override{++updates;}
+    room_color::SubmitResult SubmitColorFrame(std::shared_ptr<const room_color::ColorFrame> frame,unsigned lease)override
+    {
+        {std::lock_guard<std::mutex> lock(batch_mutex);received_batch=frame;}
+        ++color_batches;return RGBController::SubmitColorFrame(std::move(frame),lease);
+    }
+    void SetColor(unsigned index,RGBColor color)override{++direct_colors;RGBController::SetColor(index,color);}
 };
 class HarnessAPI:public FakeAPI
 {
@@ -112,6 +120,13 @@ int main(int argc,char** argv)
         CHECK(RGBGetBValue(segments.GetColor(2))>=85&&RGBGetBValue(segments.GetColor(2))<=87);
         CHECK(RGBGetBValue(segments.GetColor(4))==173);
         CHECK(segments.GetColor(2)!=segments.GetColor(4));
+        CHECK(segments.color_batches==1&&segments.direct_colors==0);
+        {
+            std::lock_guard<std::mutex> lock(segments.batch_mutex);
+            CHECK(segments.received_batch&&segments.received_batch->values.size()==4);
+            CHECK(segments.received_batch->topology==segments.GetColorTopology());
+            for(unsigned i=0;i<4;++i)CHECK(segments.received_batch->values[i].index==i+2);
+        }
         const unsigned compat_leds=api.created.front()->GetLEDCount();
         // Loading the Effects DLL without any profile/effect cannot start capture.
         QPluginLoader effects(QString::fromLocal8Bit(argv[2]));effects.setLoadHints(QLibrary::ResolveAllSymbolsHint);
@@ -119,7 +134,7 @@ int main(int argc,char** argv)
         auto* effects_plugin=qobject_cast<OpenRGBPluginInterface*>(effects_object);CHECK(effects_plugin&&effects_plugin->GetPluginAPIVersion()==5);
         effects_plugin->Load(&api);CHECK(effects_plugin->GetWidget());effects_plugin->Unload();CHECK(effects.unload());
         plugin->Unload();CHECK(visual.unload());application.processEvents();CHECK(api.created.empty());CHECK(api.detachments>=1);
-        std::cout<<"{\"ok\":true,\"realDlls\":2,\"mockHostApi\":true,\"pluginApiVersion\":5,\"crossDllImageRtti\":true,\"image\":[800,600],\"compatibilityLeds\":"<<compat_leds<<",\"previewElapsedMs\":"<<preview_elapsed_ms<<",\"previewLeaseMs\":"<<image_lease_ms<<",\"exactSharedFrame\":true,\"mappedNativeSink\":true,\"effectsLoadedWithoutCapture\":true,\"cleanUnload\":true}\n";
+        std::cout<<"{\"ok\":true,\"realDlls\":2,\"mockHostApi\":true,\"pluginApiVersion\":5,\"crossDllImageRtti\":true,\"crossDllColorRtti\":true,\"combinedSegmentsInOneColorFrame\":true,\"image\":[800,600],\"compatibilityLeds\":"<<compat_leds<<",\"previewElapsedMs\":"<<preview_elapsed_ms<<",\"previewLeaseMs\":"<<image_lease_ms<<",\"exactSharedFrame\":true,\"mappedNativeSink\":true,\"effectsLoadedWithoutCapture\":true,\"cleanUnload\":true}\n";
         return 0;
     }
     catch(const std::exception& error){std::cerr<<"Plugin DLL test: "<<error.what()<<'\n';return 1;}

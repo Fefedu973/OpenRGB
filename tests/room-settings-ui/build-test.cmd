@@ -4,6 +4,8 @@ if "%QT_ROOT%"=="" (echo Set QT_ROOT to the Qt MSVC directory. & exit /b 2)
 where cl >nul 2>nul
 if errorlevel 1 (echo Run from an x64 MSVC Developer Command Prompt. & exit /b 2)
 if not exist "%~dp0.build" mkdir "%~dp0.build"
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0prepare-network-test.ps1"
+if errorlevel 1 exit /b 1
 cd /d "%~dp0.build"
 "%QT_ROOT%\bin\qmake.exe" ..\settings_ui_test.pro
 if errorlevel 1 exit /b 1

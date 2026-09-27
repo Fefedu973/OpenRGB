@@ -43,6 +43,10 @@ const char yes = 1;
 
 using namespace std::chrono_literals;
 
+// Local queue event, never accepted from the wire. It follows every profile
+// packet queued by a retired listener, so a late ABOUT cannot reopen the guard.
+static constexpr unsigned int PROFILE_QUEUE_CANCEL = 0xFFFFFFFFu;
+
 /*---------------------------------------------------------*\
 | Macros for copying data fields from set descriptor buffer |
 | while ensuring we don't access out of bounds              |
@@ -767,12 +771,20 @@ void NetworkClient::StopClient()
     \*-----------------------------------------------------*/
     if(profilemanager_thread)
     {
-        profilemanager_thread->online = false;
+        {
+            std::lock_guard<std::mutex> lock(profilemanager_thread->queue_mutex);
+            profilemanager_thread->online = false;
+        }
         profilemanager_thread->start_cv.notify_all();
         profilemanager_thread->thread->join();
         delete profilemanager_thread->thread;
         delete profilemanager_thread;
         profilemanager_thread = nullptr;
+    }
+
+    if(remote_profile_load_pending.exchange(false))
+    {
+        ResourceManager::get()->GetProfileManager()->OnRemoteProfileLoadCancelled();
     }
 
     /*-----------------------------------------------------*\
@@ -1901,24 +1913,33 @@ void NetworkClient::SignalNetworkClientUpdate(unsigned int update_reason)
 
 void NetworkClient::ProfileManagerListenThread(NetworkClientListenerThread* this_thread)
 {
-    while(this_thread->online == true)
+    std::unique_lock<std::mutex> queue_lock(this_thread->queue_mutex);
+    while(this_thread->online)
     {
-        std::unique_lock<std::mutex> start_lock(this_thread->start_mutex);
-        this_thread->start_cv.wait(start_lock);
+        this_thread->start_cv.wait(queue_lock, [this_thread]
+        {
+            return !this_thread->online || !this_thread->queue.empty();
+        });
 
-        while(this_thread->queue.size() > 0)
+        while(this_thread->online && !this_thread->queue.empty())
         {
             NetworkClientListenerThreadQueueEntry   queue_entry;
 
-            this_thread->queue_mutex.lock();
             queue_entry = this_thread->queue.front();
             this_thread->queue.pop();
-            this_thread->queue_mutex.unlock();
+            queue_lock.unlock();
 
             switch(queue_entry.header.pkt_id)
             {
+                case PROFILE_QUEUE_CANCEL:
+                    if(remote_profile_load_pending.exchange(false))
+                        ResourceManager::get()->GetProfileManager()->OnRemoteProfileLoadCancelled();
+                    break;
+
                 case NET_PACKET_ID_PROFILEMANAGER_ACTIVE_PROFILE_CHANGED:
                     ProcessRequest_ProfileManager_ActiveProfileChanged(queue_entry.header.pkt_size, queue_entry.data);
+                    if(queue_entry.header.pkt_size && queue_entry.data)
+                        remote_profile_load_pending = false;
                     break;
 
                 case NET_PACKET_ID_PROFILEMANAGER_PROFILE_LOADED:
@@ -1926,6 +1947,7 @@ void NetworkClient::ProfileManagerListenThread(NetworkClientListenerThread* this
                     break;
 
                 case NET_PACKET_ID_PROFILEMANAGER_PROFILE_ABOUT_TO_LOAD:
+                    remote_profile_load_pending = true;
                     ProcessRequest_ProfileManager_ProfileAboutToLoad();
                     break;
 
@@ -1940,7 +1962,15 @@ void NetworkClient::ProfileManagerListenThread(NetworkClientListenerThread* this
             }
 
             delete[] queue_entry.data;
+            queue_lock.lock();
         }
+    }
+    // StopClient cancels any active transaction after joining us. Do not run
+    // old queued callbacks during an intentional shutdown.
+    while(!this_thread->queue.empty())
+    {
+        delete[] this_thread->queue.front().data;
+        this_thread->queue.pop();
     }
 }
 
@@ -2401,6 +2431,14 @@ void NetworkClient::ListenThreadFunction()
 
 listen_done:
     LOG_INFO("[%s] Client socket has been closed", NETWORKCLIENT);
+    if(profilemanager_thread)
+    {
+        std::lock_guard<std::mutex> lock(profilemanager_thread->queue_mutex);
+        NetworkClientListenerThreadQueueEntry cancel{};
+        cancel.header.pkt_id = PROFILE_QUEUE_CANCEL;
+        profilemanager_thread->queue.push(cancel);
+        profilemanager_thread->start_cv.notify_all();
+    }
     ResetImages();
     shutdown(client_sock,SD_BOTH);
     {

@@ -27,14 +27,15 @@ public:
 
     bool Capture(bool ready, const ProfileLoadState& load_state,
                  const std::function<nlohmann::json()>& collect,
-                 const std::string& source_profile)
+                 const std::function<std::string()>& source_profile)
     {
         if(!ready || load_state.Busy()) return false;
         const auto revision = load_state.Revision();
         auto plugins = collect();
+        const auto profile = source_profile();
         if(load_state.Busy() || load_state.Revision() != revision) return false;
         nlohmann::json state = {{"version", 1}, {"plugins", std::move(plugins)},
-                                {"source_profile", source_profile}};
+                                {"source_profile", profile}};
         if(!Valid(state)) return false;
         if(state == previous) return true;
         const std::string bytes = state.dump(2) + "\n";

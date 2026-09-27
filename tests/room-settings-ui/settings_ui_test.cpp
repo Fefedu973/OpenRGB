@@ -15,6 +15,7 @@
 #include "qt/LastSessionCheckpoint.h"
 
 using nlohmann::json;
+unsigned TestNetworkProfileQueue();
 static unsigned assertions = 0;
 static void Check(bool value, const char* reason)
 {
@@ -103,31 +104,47 @@ int main(int argc, char** argv)
         json plugins = {{"Synthetic effects", {{"speed", 17}, {"running", true}}},
                         {"Synthetic map", {{"version", 1}, {"active_map", "FullScale.json"}}}};
         auto collect = [&] { return plugins; };
-        Check(!checkpoint.Capture(false, loading, collect, "Alpha"), "startup/teardown gate");
+        unsigned profile_reads = 0;
+        auto profile = [&] { ++profile_reads; return std::string("Alpha"); };
+        Check(!checkpoint.Capture(false, loading, collect, profile), "startup/teardown gate");
+        Check(profile_reads == 0, "disabled capture does not read profile name");
         Check(!QFile::exists(path), "gate creates no file");
-        Check(checkpoint.Capture(true, loading, collect, "Alpha"), "first checkpoint");
+        Check(checkpoint.Capture(true, loading, collect, profile), "first checkpoint");
         const QByteArray good = ReadBytes(path);
         Check(checkpoint.WriteCount() == 1, "one write");
-        Check(checkpoint.Capture(true, loading, collect, "Alpha"), "unchanged capture accepted");
+        Check(checkpoint.Capture(true, loading, collect, profile), "unchanged capture accepted");
         Check(checkpoint.WriteCount() == 1, "unchanged JSON not rewritten");
         {
             ProfileLoadState::Scope load(loading);
-            Check(!checkpoint.Capture(true, loading, collect, "Alpha"), "in-flight load suppressed");
+            const auto before = profile_reads;
+            Check(!checkpoint.Capture(true, loading, collect, profile), "in-flight load suppressed");
+            Check(profile_reads == before, "busy capture does not read profile name");
         }
         Check(!checkpoint.Capture(true, loading, [&] {
             ProfileLoadState::Scope transient(loading);
             return json{{"Synthetic effects", {{"speed", 999}}}};
-        }, "Alpha"), "load during collection suppressed even after completion");
+        }, profile), "load during collection suppressed even after completion");
         Check(ReadBytes(path) == good, "transient state preserves last good file");
         loading.BeginRemote();
         loading.BeginRemote();
-        Check(!checkpoint.Capture(true, loading, collect, "Alpha"), "remote load suppressed");
+        Check(!checkpoint.Capture(true, loading, collect, profile), "remote load suppressed");
         loading.EndRemote();
         Check(!loading.Busy(), "duplicate remote begin balanced");
-        Check(!checkpoint.Capture(true, loading, [] { return json::object(); }, "Alpha"), "empty unloaded plugins rejected");
+        {
+            ProfileLoadState::Scope local(loading);
+            loading.BeginRemote();
+            Check(loading.EndRemote(), "disconnect cancels pending remote load");
+            Check(!loading.EndRemote(), "duplicate disconnect is harmless");
+            Check(loading.Busy(), "disconnect keeps concurrent local guard");
+        }
+        std::thread begin_remote([&] { for(unsigned i=0; i<10000; ++i) loading.BeginRemote(); });
+        std::thread cancel_remote([&] { for(unsigned i=0; i<10000; ++i) loading.EndRemote(); });
+        begin_remote.join(); cancel_remote.join(); loading.EndRemote();
+        Check(!loading.Busy(), "concurrent begin/cancel cannot underflow local depth");
+        Check(!checkpoint.Capture(true, loading, [] { return json::object(); }, profile), "empty unloaded plugins rejected");
         Check(ReadBytes(path) == good, "empty snapshot preserves previous state");
         plugins["Synthetic effects"]["speed"] = 21;
-        Check(checkpoint.Capture(true, loading, collect, "Alpha"), "changed checkpoint");
+        Check(checkpoint.Capture(true, loading, collect, profile), "changed checkpoint");
         Check(checkpoint.WriteCount() == 2, "changed JSON writes once");
         LastSessionCheckpoint reopened(path);
         json restored;
@@ -141,8 +158,9 @@ int main(int argc, char** argv)
         broken.write("{broken"); broken.close();
         Check(!reopened.Read(restored), "invalid file requests startup-profile fallback");
         LastSessionCheckpoint unavailable(directory.filePath("absent/last-session.json"));
-        Check(!unavailable.Capture(true, loading, collect, "Alpha"), "failed atomic write reported");
+        Check(!unavailable.Capture(true, loading, collect, profile), "failed atomic write reported");
         Check(unavailable.WriteCount() == 0, "failed write not committed");
+        assertions += TestNetworkProfileQueue();
         std::cout << "PASS " << assertions << " assertions; real Qt settings widgets, no hardware\n";
         return 0;
     }

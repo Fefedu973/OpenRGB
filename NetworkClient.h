@@ -291,6 +291,7 @@ private:
     std::mutex                          listener_lifecycle_mutex;
     std::thread *                       ListenThread;
     NetworkClientListenerThread*        profilemanager_thread;
+    std::atomic<bool>                   remote_profile_load_pending{false};
 
     /*-----------------------------------------------------*\
     | Receive queue thread.  Runs the callback-emitting     |

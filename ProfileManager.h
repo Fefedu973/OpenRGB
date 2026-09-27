@@ -117,6 +117,7 @@ public:
 
     void                        OnProfileAboutToLoad();
     void                        OnProfileLoaded(std::string profile_json_string);
+    void                        OnRemoteProfileLoadCancelled();
 
     void                        MigrateLegacyProfiles();
 
@@ -155,6 +156,7 @@ private:
     | Active profile string                                 |
     \*-----------------------------------------------------*/
     std::string                 active_profile;
+    std::mutex                  active_profile_mutex;
 
     /*-----------------------------------------------------*\
     | Profile paths                                         |

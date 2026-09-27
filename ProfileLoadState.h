@@ -19,10 +19,10 @@ public:
         ProfileLoadState& state;
     };
 
-    bool Busy() const { return depth.load() != 0; }
+    bool Busy() const { return depth.load() != 0 || remote.load(); }
     uint64_t Revision() const { return revision.load(); }
-    void BeginRemote() { if(!remote.exchange(true)) Begin(); }
-    void EndRemote() { if(remote.exchange(false)) End(); }
+    void BeginRemote() { if(!remote.exchange(true)) ++revision; }
+    bool EndRemote() { if(!remote.exchange(false)) return false; ++revision; return true; }
 
 private:
     void Begin() { ++depth; ++revision; }

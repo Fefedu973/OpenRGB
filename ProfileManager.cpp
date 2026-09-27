@@ -175,16 +175,17 @@ ProfileManager::~ProfileManager()
 
 void ProfileManager::ApplyActiveProfilePluginData()
 {
+    const std::string profile = GetActiveProfile();
     /*-----------------------------------------------------*\
     | The server only sends profile data to the clients     |
     | connected at the time it loads, and plugins only      |
     | exist in the GUI, so read it back here                |
     \*-----------------------------------------------------*/
-    if(!active_profile.empty() && ResourceManager::get()->IsLocalClient() && (ResourceManager::get()->GetLocalClient()->GetSupportsProfileManagerAPI()))
+    if(!profile.empty() && ResourceManager::get()->IsLocalClient() && (ResourceManager::get()->GetLocalClient()->GetSupportsProfileManagerAPI()))
     {
-        LOG_DEBUG("[%s] Reading active profile for plugin data: %s", PROFILEMANAGER, active_profile.c_str());
+        LOG_DEBUG("[%s] Reading active profile for plugin data: %s", PROFILEMANAGER, profile.c_str());
 
-        OnProfileLoaded(ResourceManager::get()->GetLocalClient()->ProfileManager_DownloadProfile(active_profile));
+        OnProfileLoaded(ResourceManager::get()->GetLocalClient()->ProfileManager_DownloadProfile(profile));
     }
 }
 
@@ -258,6 +259,7 @@ void ProfileManager::DeleteProfile(std::string profile_name)
 
 std::string ProfileManager::GetActiveProfile()
 {
+    std::lock_guard<std::mutex> lock(active_profile_mutex);
     return(active_profile);
 }
 
@@ -488,7 +490,7 @@ bool ProfileManager::LoadAutoProfileSuspend()
 
 bool ProfileManager::LoadControllerActiveProfile(RGBController* load_controller)
 {
-    if(active_profile == "")
+    if(GetActiveProfile().empty())
     {
         return false;
     }
@@ -539,11 +541,6 @@ void ProfileManager::OnProfileAboutToLoad()
 
 void ProfileManager::OnProfileLoaded(std::string profile_json_string)
 {
-    struct FinishRemote
-    {
-        ProfileLoadState& state;
-        ~FinishRemote() { state.EndRemote(); }
-    } finish{load_state};
     nlohmann::json profile_json;
     JsonUtils::JsonParse(profile_json_string, profile_json);
 
@@ -556,6 +553,16 @@ void ProfileManager::OnProfileLoaded(std::string profile_json_string)
     {
         plugin_manager->OnProfileLoad(profile_json["plugins"]);
     }
+}
+
+void ProfileManager::OnRemoteProfileLoadCancelled()
+{
+    ProfileLoadState::Scope completing(load_state);
+    load_state.EndRemote();
+    // NetworkClient emits this once per transaction. The connection may also
+    // disappear after LOADED but before ACTIVE_PROFILE_CHANGED; plugins still
+    // need completion in that case (e.g. resume a legacy profile's map).
+    SignalProfileManagerUpdate(PROFILEMANAGER_UPDATE_REASON_ACTIVE_PROFILE_CHANGED);
 }
 
 void ProfileManager::RegisterProfileManagerCallback(ProfileManagerCallback new_callback, void * new_callback_arg)
@@ -1077,16 +1084,22 @@ bool ProfileManager::SaveConfiguration()
 
 void ProfileManager::SetActiveProfile(std::string profile_name)
 {
-    active_profile = profile_name;
+    {
+        std::lock_guard<std::mutex> lock(active_profile_mutex);
+        active_profile = profile_name;
+    }
 
     NetworkServer* server = ResourceManager::get()->GetServer();
 
     if(server)
     {
-        server->SendRequest_ProfileManager_ActiveProfileChanged(active_profile);
+        server->SendRequest_ProfileManager_ActiveProfileChanged(profile_name);
     }
 
     SignalProfileManagerUpdate(PROFILEMANAGER_UPDATE_REASON_ACTIVE_PROFILE_CHANGED);
+    // ACTIVE is the final remote transaction event. Keep checkpointing paused
+    // through the plugin completion callbacks, not merely through LOADED.
+    load_state.EndRemote();
 }
 
 void ProfileManager::SetConfigurationDirectory(const filesystem::path& directory)
@@ -1267,7 +1280,11 @@ void ProfileManager::UpdateProfileList()
     if(ResourceManager::get()->IsLocalClient() && (ResourceManager::get()->GetLocalClient()->GetSupportsProfileManagerAPI()))
     {
         ResourceManager::get()->GetLocalClient()->ProfileManager_GetProfileList();
-        active_profile = ResourceManager::get()->GetLocalClient()->ProfileManager_GetActiveProfile();
+        const auto profile = ResourceManager::get()->GetLocalClient()->ProfileManager_GetActiveProfile();
+        {
+            std::lock_guard<std::mutex> lock(active_profile_mutex);
+            active_profile = profile;
+        }
 
         SignalProfileManagerUpdate(PROFILEMANAGER_UPDATE_REASON_PROFILE_LIST_UPDATED);
     }
@@ -1723,7 +1740,7 @@ bool ProfileManager::LoadProfileWithOptions
 
     if(server)
     {
-        server->SendRequest_ProfileManager_ActiveProfileChanged(active_profile);
+        server->SendRequest_ProfileManager_ActiveProfileChanged(profile_name);
     }
 
     return(true);

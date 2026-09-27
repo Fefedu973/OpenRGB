@@ -1723,7 +1723,8 @@ void OpenRGBDialog::CaptureLastSession()
     try
     {
         session_checkpoint->Capture(true, profiles->GetLoadState(),
-            [this] { return plugin_manager->OnProfileSave(); }, profiles->GetActiveProfile());
+            [this] { return plugin_manager->OnProfileSave(); },
+            [profiles] { return profiles->GetActiveProfile(); });
     }
     catch(const std::exception& error)
     {

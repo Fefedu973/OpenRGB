@@ -14,9 +14,15 @@ The production `LastSessionCheckpoint` and `ProfileLoadState` are also exercised
 atomic file round-trip through a temporary directory, unchanged JSON deduplication,
 loads in progress and loads completed during serialization, remote-load pairing,
 empty/transient states, invalid JSON/version, controller-data exclusion, and failed
-file writes. This does not substitute for a packaged application restart test.
+file writes. The test also compiles the production network profile worker body
+(extracted by `prepare-network-test.ps1`) with fake plugin callbacks. It covers an
+ABOUT packet still queued at disconnect, loss after LOADED before ACTIVE, a new
+transaction after reconnect, and intentional shutdown. No socket is opened.
+Concurrent remote begin/cancel cannot underflow a local loading scope; a busy
+capture never evaluates the profile-name provider.
+This does not substitute for a packaged application restart test.
 
-Validated on Windows x64, Qt 6.8.3 / MSVC 2022: **130 assertions passed**.
+Validated on Windows x64, Qt 6.8.3 / MSVC 2022: **142 assertions passed**.
 Before the fix, the real nine-section schema reproduction lost all 10 group boxes
 after a worker refresh; updating its profile lists caused 13 unnecessary settings
 writes. Both symptoms are covered by the synthetic public regression fixture.

@@ -44,3 +44,20 @@ normally so it cannot overwrite edited manifests. Replace only the reviewed
 folder page and add the new shortcut actions. Keep the original parent-folder
 action and its image. Restore the saved profile tree with Elgato closed to undo.
 This source and test contain no live profile IDs, device addresses or credentials.
+
+`extend_effects_menu.py` prepares an additional submenu containing up to 14
+native effect profiles. It requires a free parent key and preserves every
+existing action. Pass `--profile-dir`, `--parent-page`, `--profiles-dir`,
+`--shortcuts`, `--title` and an `--output` directory outside the live profile.
+The proposal records the original parent manifest hash; check that hash again
+before installation so a newer user edit is never overwritten. Preparation does
+not create shortcuts or modify the live profile.
+
+For background diagnostics, `python tools/room-sdk/streamdeck_status.py
+--samples 3` reads the cached native compositor status through SDK7. It does not
+send images, select profiles or modify configuration. An increasing ACK count
+proves compositor activity, not visible LCD output: empty-key cache failures
+must also be checked on the device. `--self-test` validates descriptor parsing
+offline. Replacing the native compositor DLL requires OpenRGB to exit fully;
+when updating Elgato profiles too, quit OpenRGB before quitting Elgato to allow
+the old background to restore normally.

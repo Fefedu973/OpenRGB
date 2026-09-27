@@ -88,5 +88,13 @@ interprétation de leurs positions n'a été introduite.
   Deux délais GATT au démarrage ont été récupérés automatiquement. Des fermetures
   périodiques de session H6008 sont encore observées ensuite ; ce correctif du
   cache vide ne prétend pas résoudre leur cause distincte.
+- L'utilisateur a ensuite confirmé visuellement que les deux H61A2, les trois
+  H6008 et la bande H6159 suivent l'effet. Le placement récupéré correspond aux
+  deux tronçons horizontaux et au serpentin vertical décrits.
+- Les premières fermetures H6008 arrivent environ 44,4 secondes après le passage
+  en streaming. Aucun keepalive manquant n'a été identifié : l'ancien pont et
+  le natif interrogent AA01 toutes les 500 ms ; aucun des deux n'envoie AA14
+  périodiquement. La cause reste inconnue. Le journal ne réaffiche pas toujours
+  « streaming » après récupération, car ce message est dédupliqué par état.
 - **Un véritable redémarrage Windows avec ce nouveau binaire n'est pas validé par
   cette note**, ni la stabilité prolongée des quatre connexions.

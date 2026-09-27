@@ -14,7 +14,11 @@ chargement SDK qui commence et se termine pendant la collecte.
 
 Au premier démarrage de l’interface, après le chargement des plugins, un checkpoint
 valide a priorité sur **Load Profile on Open**. Si le fichier manque, est invalide,
-ou si sa restauration échoue, le profil de démarrage configuré reste le repli.
+ou si un plugin remonte une exception pendant sa restauration, le profil de
+démarrage configuré reste le repli. L'API des plugins ne renvoie pas de résultat :
+une erreur absorbée en interne par un plugin ne déclenche pas ce repli. Par
+exemple, Visual Map laisse volontairement les sorties désactivées si la carte
+explicitement demandée est absente, et consigne cette erreur dans le journal.
 Un rescan des appareils ne relance pas ce choix initial. Les options explicites
 de profil à la sortie et à la reprise après veille gardent leur comportement.
 

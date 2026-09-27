@@ -9,7 +9,7 @@ changed when selecting these profiles.
 | Full Scale - Rainbow | Full Scale | Existing continuous spatial rainbow |
 | Full Blanc | Full Scale | Constant white on LEDs and image backgrounds |
 | Full Noir | Full Scale | Black on LEDs and image backgrounds |
-| Music - Tri Band | Music - Tri Band | Three audio bands, pulses, rising meters and surface visualization |
+| Music - Room Pulse | Music - Room Pulse | Mirrored spectrum, bass/volume meters, pulse lights and circular fan sectors |
 | Ambilight - Web Page | Full Scale | The page served at `https://localhost:8443` |
 
 Stream Deck button icons remain managed by Elgato. Full Noir blacks out the
@@ -17,6 +17,21 @@ lighting/background; it does not remove icons or turn off the desktop displays.
 The white and black presets maintain their image leases at 10 FPS. Ambilight
 requests 20 FPS at 800 × 500; actual rendering throughput depends on WebView2,
 the source page and the GPU. Both canvases retain the room's 320:200 aspect ratio.
+
+## Stream Deck Lights
+
+The Lights folder selects Blanc, Éteindre, Musique, Ambilight and Rainbow. Its
+Autres effets subfolder contains Plasma, Feu, Aurore, Ondes, Etoiles and Bulles.
+Each button invokes the native one-shot helper documented in
+`tools/room-streamdeck/README.md`. It selects a profile in the existing OpenRGB
+instance through localhost SDK and exits; it is not another lighting bridge.
+OpenRGB must already be running. Parent navigation and Elgato's icon/action
+management remain in place.
+
+The six additional presets are original native shaders, not claimed ports of
+SignalRGB favorites. `tools/room-setup/create-extra-scenes.py` recreates them
+offline from the rainbow preset and the Effects fork's `shaders/room-*.fs`.
+Existing profiles are not overwritten by either generator.
 
 ## Music
 
@@ -27,22 +42,29 @@ microphone or a separate audio bridge. Audio settings remain editable in the
 shader's settings: input, amplitude, smoothing, decay and equalizer.
 
 The dedicated 320 × 200 map preserves every routed device/segment and LED index.
-Its three columns are bass, mid and treble. Small lamps and fans pulse in the
-upper bass area. The keyboard, mat, Stream Deck and wallpaper span the three
-columns. Below them, strips and cables form meters rising from their first LED;
-native segment offsets preserve continuity across split strips.
+Its organization follows the functional regions of the user's Pump Up Beats
+configuration: a large spectrum mirrored horizontally and vertically (bass at
+its center), a volume meter at the left, a bass meter at the top, separate bass
+and volume pulse tiles, a circular fan sector and a frequency strip at the bottom.
+The screen outputs use the central spectrum; the strips, fans, RAM and small
+lights sample their matching regions. The existing music arrangement is reused
+where available, with the second H61A2 included and out-of-bounds endpoint samples
+fitted inside the canvas. Full Scale is not changed by these placements.
 
-This is an original multi-band preset, not a reproduction of SignalRGB code.
+Room Pulse is original code inspired by that organization, not redistributed
+SignalRGB source. Its native audio envelope supplies volume, bass, an onset pulse
+and a hue that changes on detected bass attacks; it does not claim a measured BPM.
 The inherited DSP supplies 64 magnitudes expanded to 256 shader slots; those
 slots should not be described as 256 independent FFT frequency bins. See the
-Effects fork's `Documentation/Room-Music.md` for the exact shader contract.
+Effects fork's music documentation for the shader settings and exact contract.
 
 ## Ambilight
 
 Start Better SignalRGB Screen Capture so its local HTTPS page is available,
 then select **Ambilight - Web Page**. The browser renderer captures that page
 directly. Full Scale remains the physical room map; arrange the screen regions
-inside the capture application to match it. The website must use a certificate
+inside the capture application to match it. If the local web server starts later, HTTP(S) navigation retries automatically.
+The website must use a certificate
 trusted by Windows; this setup does not bypass TLS verification.
 
 ## Persistence
@@ -69,8 +91,9 @@ emits selection changes that accidentally rewrite saved startup choices.
 
 `tools/room-setup/create-room-scenes.py` is an offline generator. Supply the
 current Full Scale map, a complete native SDK profile export (including RAM and
-all strip segments), the existing rainbow profile and the music template from
-the Effects fork. It writes a **new** output directory and never edits live
+all strip segments), the existing rainbow profile and the Room Pulse template from
+the Effects fork. An optional `--reference-music-map` reuses an existing music
+arrangement by exact device/zone/segment identity. It writes a **new** output directory and never edits live
 configuration or the source layout. Machine-specific identifiers stay private.
 
 The two forks' persistence and audio tests exercise real Qt/plugin code with

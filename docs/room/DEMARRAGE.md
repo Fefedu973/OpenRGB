@@ -65,12 +65,22 @@ notamment l'AW3426DW limité à dix mises à jour/s pour éviter l'accumulation 
 commandes. Le profil de démarrage contient uniquement les réglages d'effets ;
 il ne remplace pas les tailles de zones et segments enregistrées.
 
-Les profils **Full Blanc**, **Full Noir**, **Music - Tri Band** et
+Les profils **Full Blanc**, **Full Noir**, **Music - Room Pulse** et
 **Ambilight - Web Page** sont également installés. Music sélectionne sa carte
 spécialisée ; les autres reprennent Full Scale. Ambilight rend
 `https://localhost:8443`, avec les écrans placés dans l'application de capture.
 Les déplacements dans Visual Map sont automatiquement enregistrés dans le
 fichier de la carte. Voir `scenes-and-persistence.md` pour les détails.
+
+Le dossier **Lights** du Stream Deck sélectionne ces cinq profils. **Autres
+effets** propose Plasma, Feu, Aurore, Ondes, Etoiles et Bulles, rendus par des
+shaders natifs. Chaque bouton appelle brièvement `dist-room/ProfileSelect.exe`,
+qui commande l'instance OpenRGB existante puis se termine.
+
+Le routage du canvas regroupe maintenant les couleurs par appareil et conserve
+seulement la dernière image en attente. Les écritures lentes de la carte graphique,
+des contrôleurs USB ou de la RAM ne bloquent plus ce routeur commun. Les limites
+propres à chaque appareil restent applicables. Voir `color-routing.md`.
 
 `tools/room-setup/Install-NativeStartup.ps1` installe une tâche **OpenRGB Room**
 qui lance directement `OpenRGB.exe` quinze secondes après ouverture de session.

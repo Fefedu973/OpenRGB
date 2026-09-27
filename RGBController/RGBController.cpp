@@ -97,6 +97,8 @@ RGBController::RGBController()
 
 RGBController::~RGBController()
 {
+    ColorFrameAccepting = false;
+    DiscardPendingColorFrame();
     /*-----------------------------------------------------*\
     | Stop device thread if not already stopped             |
     \*-----------------------------------------------------*/
@@ -1598,6 +1600,7 @@ RGBColor* RGBController::GetColorsPointer()
 void RGBController::SetColor(unsigned int led, RGBColor color)
 {
     AccessMutex.lock();
+    DiscardPendingColorFrame();
     if(led < colors.size())
     {
         colors[led] = color;
@@ -1616,6 +1619,7 @@ void RGBController::SetAllColors(RGBColor color)
 void RGBController::SetAllZoneColors(int zone, RGBColor color)
 {
     AccessMutex.lock();
+    DiscardPendingColorFrame();
     for(std::size_t color_idx = 0; color_idx < LEDsInZone(zone); color_idx++)
     {
         zones[zone].colors[color_idx] = color;
@@ -1968,6 +1972,8 @@ void RGBController::SignalUpdate(unsigned int update_reason)
 \*---------------------------------------------------------*/
 void RGBController::Shutdown()
 {
+    ColorFrameAccepting = false;
+    DiscardPendingColorFrame();
     /*-----------------------------------------------------*\
     | Stop device thread                                    |
     \*-----------------------------------------------------*/
@@ -2053,6 +2059,7 @@ void RGBController::DeviceCallThreadFunction()
 
     while(DeviceThreadRunning.load() == true)
     {
+        ApplyPendingColorFrame();
         if(CallFlag_UpdateMode.load() == true)
         {
             if(flags & CONTROLLER_FLAG_RESET_BEFORE_UPDATE)
@@ -2100,6 +2107,7 @@ void RGBController::ClearSegments(int zone)
     {
         AccessMutex.lock();
         zones[zone].segments.clear();
+        InvalidateColorTopology();
         AccessMutex.unlock();
 
         zones[zone].flags &= ~ZONE_FLAG_MANUALLY_CONFIGURED_SEGMENTS;
@@ -2114,6 +2122,7 @@ void RGBController::AddSegment(int zone, segment new_segment)
     {
         AccessMutex.lock();
         zones[zone].segments.push_back(new_segment);
+        InvalidateColorTopology();
         AccessMutex.unlock();
 
         zones[zone].flags |= ZONE_FLAG_MANUALLY_CONFIGURED_SEGMENTS;
@@ -2125,6 +2134,7 @@ void RGBController::AddSegment(int zone, segment new_segment)
 void RGBController::ConfigureZone(int zone_idx, zone new_zone)
 {
     AccessMutex.lock();
+    InvalidateColorTopology();
 
     if(new_zone.flags & ZONE_FLAG_MANUALLY_CONFIGURED_SIZE)
     {
@@ -2312,6 +2322,81 @@ void RGBController::SetupColors()
 
         total_led_count += zone_led_count;
     }
+    InvalidateColorTopology();
+}
+
+uint64_t RGBController::GetColorTopology() const
+{
+    return ColorTopology.load();
+}
+
+room_color::SubmitResult RGBController::SubmitColorFrame(
+    std::shared_ptr<const room_color::ColorFrame> frame, unsigned lease_ms)
+{
+    using room_color::SubmitResult;
+    if(!ColorFrameAccepting.load()) return SubmitResult::Busy;
+    if(!frame || frame->values.empty() || frame->values.size() > room_color::MaxUpdates ||
+       lease_ms < 100 || lease_ms > 5000) return SubmitResult::Invalid;
+    if(frame->topology != ColorTopology.load()) return SubmitResult::Stale;
+    std::unique_lock<std::mutex> lock(ColorFrameMutex, std::try_to_lock);
+    if(!lock.owns_lock()) return SubmitResult::Busy;
+    if(!ColorFrameAccepting.load()) return SubmitResult::Busy;
+    if(frame->topology != ColorTopology.load()) return SubmitResult::Stale;
+    auto previous = std::move(PendingColorFrame);
+    PendingColorFrame = std::move(frame);
+    PendingColorExpiry = ColorFrameClock::now() + std::chrono::milliseconds(lease_ms);
+    ColorFramePending = true;
+    lock.unlock(); // Do not release a possibly large replaced vector under lock.
+    return SubmitResult::Accepted;
+}
+
+void RGBController::DiscardPendingColorFrame()
+{
+    std::shared_ptr<const room_color::ColorFrame> previous;
+    {
+        std::lock_guard<std::mutex> lock(ColorFrameMutex);
+        previous = std::move(PendingColorFrame);
+        ColorFramePending = false;
+    }
+}
+
+void RGBController::InvalidateColorTopology()
+{
+    // Called while the controller's topology is being configured under
+    // AccessMutex (or during construction, before publication).
+    std::shared_ptr<const room_color::ColorFrame> previous;
+    {
+        std::lock_guard<std::mutex> lock(ColorFrameMutex);
+        ++ColorTopology;
+        previous = std::move(PendingColorFrame);
+        ColorFramePending = false;
+    }
+}
+
+void RGBController::ApplyPendingColorFrame()
+{
+    if(!ColorFramePending.load()) return;
+    std::shared_ptr<const room_color::ColorFrame> frame;
+    ColorFrameClock::time_point expiry;
+    {
+        // Only this controller's existing worker waits for slow I/O. Producers
+        // use the separate mailbox and never wait on AccessMutex.
+        std::unique_lock<std::shared_mutex> access(AccessMutex);
+        {
+            std::lock_guard<std::mutex> lock(ColorFrameMutex);
+            frame = std::move(PendingColorFrame);
+            expiry = PendingColorExpiry;
+            ColorFramePending = false;
+        }
+        if(!frame || !ColorFrameAccepting.load() || frame->topology != ColorTopology.load() ||
+           ColorFrameClock::now() >= expiry) return;
+        for(const auto& value : frame->values)
+            if(value.index >= colors.size()) return;
+        for(const auto& value : frame->values)
+            colors[value.index] = value.color;
+    }
+    CallFlag_UpdateLEDs = true;
+    SignalUpdate(RGBCONTROLLER_UPDATE_REASON_UPDATELEDS);
 }
 
 void RGBController::UpdateLEDsInternal()
@@ -3340,6 +3425,7 @@ unsigned char* RGBController::SetDeviceDescription(unsigned char* data_ptr, unsi
     | Lock access mutex                                     |
     \*-----------------------------------------------------*/
     controller->AccessMutex.lock();
+    controller->InvalidateColorTopology();
 
     /*-----------------------------------------------------*\
     | Copy in type                                          |
@@ -3523,14 +3609,14 @@ unsigned char* RGBController::SetDeviceDescription(unsigned char* data_ptr, unsi
     }
 
     /*-----------------------------------------------------*\
-    | Unlock access mutex                                   |
-    \*-----------------------------------------------------*/
-    controller->AccessMutex.unlock();
-
-    /*-----------------------------------------------------*\
     | Setup colors                                          |
     \*-----------------------------------------------------*/
     controller->SetupColors();
+
+    /*-----------------------------------------------------*\
+    | Unlock only after color storage and topology agree    |
+    \*-----------------------------------------------------*/
+    controller->AccessMutex.unlock();
 
     return(data_ptr);
 }
@@ -3568,6 +3654,7 @@ unsigned char* RGBController::SetColorDescription(unsigned char* data_ptr, unsig
     if(resize)
     {
         controller->colors.resize(num_colors);
+        controller->InvalidateColorTopology();
     }
     /*-----------------------------------------------------*\
     | Otherwise, verify we aren't reading beyond the list   |
@@ -3580,6 +3667,8 @@ unsigned char* RGBController::SetColorDescription(unsigned char* data_ptr, unsig
             return(NULL);
         }
     }
+
+    controller->DiscardPendingColorFrame();
 
     /*-----------------------------------------------------*\
     | Copy in colors                                        |
@@ -4177,6 +4266,7 @@ void RGBController::SetDeviceDescriptionJSON(nlohmann::json controller_json, RGB
     | Lock access mutex                                     |
     \*-----------------------------------------------------*/
     controller->AccessMutex.lock();
+    controller->InvalidateColorTopology();
 
     /*-----------------------------------------------------*\
     | Controller information strings                        |
@@ -4305,14 +4395,14 @@ void RGBController::SetDeviceDescriptionJSON(nlohmann::json controller_json, RGB
     }
 
     /*-----------------------------------------------------*\
-    | Unlock access mutex                                   |
-    \*-----------------------------------------------------*/
-    controller->AccessMutex.unlock();
-
-    /*-----------------------------------------------------*\
     | Setup colors                                          |
     \*-----------------------------------------------------*/
     controller->SetupColors();
+
+    /*-----------------------------------------------------*\
+    | Unlock only after color storage and topology agree    |
+    \*-----------------------------------------------------*/
+    controller->AccessMutex.unlock();
 }
 
 led RGBController::SetLEDDescriptionJSON(nlohmann::json led_json)

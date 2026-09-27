@@ -19,8 +19,9 @@
 #include <mutex>
 #include <shared_mutex>
 #include "RGBControllerInterface.h"
+#include "FrameRouting/RGBControllerColorFrameInterface.h"
 
-class RGBController : public RGBControllerInterface
+class RGBController : public RGBControllerInterface, public room_color::RGBControllerColorFrameInterface
 {
 public:
     /*-----------------------------------------------------*\
@@ -28,6 +29,9 @@ public:
     \*-----------------------------------------------------*/
     RGBController();
     virtual ~RGBController();
+    uint64_t GetColorTopology() const override;
+    room_color::SubmitResult SubmitColorFrame(std::shared_ptr<const room_color::ColorFrame> frame,
+                                              unsigned lease_ms = 1000) override;
 
     /*-----------------------------------------------------*\
     | Controller Information                                |
@@ -306,6 +310,16 @@ protected:
     void                    UpdateLEDsInternal();
 
 private:
+    using ColorFrameClock = std::chrono::steady_clock;
+    std::mutex             ColorFrameMutex;
+    std::shared_ptr<const room_color::ColorFrame> PendingColorFrame;
+    ColorFrameClock::time_point PendingColorExpiry;
+    std::atomic<uint64_t>   ColorTopology{1};
+    std::atomic<bool>       ColorFramePending{false};
+    std::atomic<bool>       ColorFrameAccepting{true};
+    void                    ApplyPendingColorFrame();
+    void                    InvalidateColorTopology();
+    void                    DiscardPendingColorFrame();
     /*-----------------------------------------------------*\
     | Device thread variables                               |
     \*-----------------------------------------------------*/

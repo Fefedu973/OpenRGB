@@ -363,3 +363,29 @@ bool KBHEController::RestoreHardware()
     std::lock_guard<std::mutex> lock(io_mutex);
     return RestoreUnlocked();
 }
+
+bool KBHEController::KeepBlackOnExit()
+{
+    std::lock_guard<std::mutex> lock(io_mutex);
+    if(!owns_mode) return true; // Never take over an untouched/external device on exit.
+    Reply reply{};
+    bool ok = ExpectOK(Command(0x6E), reply);
+    if(ok && reply[2] != LIVE_MODE)
+    {
+        ClearOwnership();
+        restoration_result = "external_mode_preserved";
+        return true;
+    }
+    Frame black{}, verification{};
+    if(ok) ok = WriteFrame(black) && ReadFrame(verification);
+    if(ok && verification != black)
+    {
+        last_error = "Black exit RGB readback differs";
+        ok = false;
+    }
+    // Never undo a requested black exit by restoring a colorful snapshot after
+    // a lost ACK. The destructor will only close the existing HID handle.
+    ClearOwnership();
+    restoration_result = ok ? "black_exit_confirmed" : "black_exit_unconfirmed";
+    return ok;
+}

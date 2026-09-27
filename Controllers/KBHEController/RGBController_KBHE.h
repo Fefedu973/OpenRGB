@@ -6,7 +6,7 @@
 class RGBController_KBHE : public RGBController
 {
 public:
-    explicit RGBController_KBHE(KBHEController* controller);
+    explicit RGBController_KBHE(KBHEController* controller, bool keep_black_on_exit = false);
     ~RGBController_KBHE();
     void SetupZones();
     void DeviceUpdateLEDs();
@@ -17,6 +17,7 @@ public:
 private:
     void ReportError();
     KBHEController* controller;
+    bool keep_black_on_exit;
     bool direct_selected = false;
     std::string reported_error;
 };

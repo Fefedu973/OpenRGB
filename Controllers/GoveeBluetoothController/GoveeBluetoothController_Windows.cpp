@@ -639,10 +639,18 @@ Controller::Controller(Configuration configuration_) : configuration(std::move(c
 }
 Controller::~Controller()
 {
+    Stop();
+    SecureZeroMemory(configuration.key.data(), configuration.key.size());
+}
+void Controller::Stop(bool requested_black)
+{
+    if(!worker.joinable()) return;
+    // The RGB controller supplies its final colors after joining its producer,
+    // including a black exit color not yet consumed by this BLE worker.
+    final_black = configuration.keep_black_on_exit && requested_black;
     stopping = true;
     wake.notify_all();
-    if(worker.joinable()) worker.join();
-    SecureZeroMemory(configuration.key.data(), configuration.key.size());
+    worker.join();
 }
 void Controller::Submit(Frame frame)
 {
@@ -721,8 +729,19 @@ void Controller::Run()
             }
         }
         transport.BeginRestore();
-        try { session.Release(); }
-        catch(...) { LOG_WARNING("[Govee BLE] Shutdown restoration could not be completed; no reconnect attempted"); }
+        try
+        {
+            session.Release(final_black.load());
+            if(final_black && session.State() != "black_exit_confirmed")
+                LOG_WARNING("[Govee BLE] Black exit could not be confirmed on the existing session; no reconnect attempted");
+            else if(final_black)
+                LOG_INFO("[Govee BLE] %s: black exit confirmed (power OFF readback)", configuration.name.c_str());
+        }
+        catch(...)
+        {
+            LOG_WARNING("[Govee BLE] Shutdown %s could not be completed; no reconnect attempted",
+                final_black ? "blackout" : "restoration");
+        }
         transport.Disconnect();
     }
     ReleaseMutex(ownership);

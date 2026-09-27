@@ -12,7 +12,7 @@ public:
     Session(Profile profile, Transport& transport);
     Session(Profile profile, Transport& transport, bool power_on_acquire);
     void Step(const Frame& frame, uint64_t now_ms);
-    void Release();
+    void Release(bool keep_black = false);
     std::string State() const { return state; }
     bool RecoveredBaseline() const { return recovered_baseline; }
 private:

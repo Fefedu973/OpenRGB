@@ -14,6 +14,7 @@ struct Fake : Transport
     bool connected = false;
     bool fail_color_readback = false;
     bool drop_color_writes = false;
+    bool drop_power_writes = false;
     uint8_t power = 1, brightness = 151;
     Packet mode;
     unsigned int connects = 0;
@@ -27,7 +28,7 @@ struct Fake : Transport
     void Send(const Packet& p) override
     {
         assert(connected && ValidPacket(p)); writes.push_back(p);
-        if(p[1] == 1) power = p[2];
+        if(p[1] == 1) { if(!drop_power_writes) power = p[2]; }
         else if(p[1] == 4) brightness = p[2];
         else if(p[1] == 5)
         {
@@ -291,6 +292,48 @@ int main()
         Fake radio(Profile::H6159);radio.mode=MakePacket(0xAA,5,{2,12,34,56,3});Session session(Profile::H6159,radio);
         Reject([&]{session.Step({{{1,2,3}},100},0);});assert(radio.writes.empty());
         check("unknown H6159 mode fields rejected before writes");
+    }
+    for(const auto profile : {Profile::H6008, Profile::H6159})
+    {
+        Fake radio(profile);Session session(profile,radio);
+        session.Step({{{71,52,33}},100},0);
+        const auto start=radio.writes.size();
+        // The exit black reached the core buffer only: no black Step occurred.
+        session.Release(true);
+        assert(radio.power==0 && !radio.connected && radio.connects==1);
+        assert(session.State()=="black_exit_confirmed");
+        assert(radio.writes.size()==start+1 && radio.writes.back()==MakePacket(0x33,1,{0}));
+        assert(radio.queries.back()==1);
+        check(profile==Profile::H6008 ? "H6008 pending exit black confirms OFF without restoring mode" :
+            "H6159 pending exit black confirms OFF without restoring power/brightness");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{0,0,0}},100},0);session.Release(true);
+        assert(radio.power==0 && session.State()=="black_exit_confirmed");
+        check("blackout already owned is not turned back ON by black-exit policy");
+    }
+    {
+        Fake radio(Profile::H6008);Session session(Profile::H6008,radio);
+        session.Step({{{3,4,5}},100},0);radio.Disconnect();
+        const auto count=radio.writes.size();session.Release(true);
+        assert(radio.writes.size()==count && radio.connects==1);
+        assert(session.State()=="black_exit_unconfirmed");
+        check("disconnected black exit never reconnects or claims confirmation");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Release(true);assert(radio.connects==0 && radio.writes.empty());
+        assert(session.State()=="black_exit_unconfirmed");
+        check("unacquired black exit never takes over a device");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{5,6,7}},100},0);radio.drop_power_writes=true;
+        const auto count=radio.writes.size();Reject([&]{session.Release(true);});
+        assert(radio.power==1 && radio.writes.size()==count+1);
+        assert(session.State()=="black_exit_unconfirmed");
+        check("black exit requires power readback; failed OFF does not fall back to colorful restoration");
     }
     std::cout << tests << " offline protocol/session tests passed\n";
 }

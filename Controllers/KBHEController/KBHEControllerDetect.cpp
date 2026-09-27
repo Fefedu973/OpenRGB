@@ -4,6 +4,8 @@
 #include "RGBController_KBHE.h"
 #include "StringUtils.h"
 #include "LogManager.h"
+#include "ResourceManager.h"
+#include "SettingsManager.h"
 
 DetectedControllers DetectKBHEControllers(hid_device_info* info, const std::string&)
 {
@@ -26,7 +28,15 @@ DetectedControllers DetectKBHEControllers(hid_device_info* info, const std::stri
     KBHEController* controller = new KBHEController(handle, info->path, serial, legacy_75he);
     if(controller->Probe())
     {
-        result.push_back(new RGBController_KBHE(controller));
+        auto* settings_manager = ResourceManager::get()->GetSettingsManager();
+        json schema;
+        schema["keep_black_on_exit"] = {{"type", "bool"}, {"default", false},
+            {"title", "Keep black when closing"},
+            {"description", "When all final Direct-mode keys are black, confirm the black live frame instead of restoring the previous hardware effect. Other colors keep normal restoration."}};
+        settings_manager->RegisterSettingsSchemaLocalOnly("KBHE", "KBHE", schema);
+        const json settings = settings_manager->GetSettings("KBHE");
+        result.push_back(new RGBController_KBHE(controller,
+            settings.is_object() && settings.value("keep_black_on_exit", false)));
     }
     else
     {

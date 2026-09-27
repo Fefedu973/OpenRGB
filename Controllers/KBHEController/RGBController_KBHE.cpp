@@ -13,7 +13,8 @@
     @detectors DetectKBHEControllers
     @comment 82-key ISO layout. Hardware mode restores the prior firmware effect.
 \*-------------------------------------------------------------------*/
-RGBController_KBHE::RGBController_KBHE(KBHEController* device_controller) : controller(device_controller)
+RGBController_KBHE::RGBController_KBHE(KBHEController* device_controller, bool keep_black) :
+    controller(device_controller), keep_black_on_exit(keep_black)
 {
     name        = "KBHE 75HE";
     vendor      = "KBHE";
@@ -41,6 +42,19 @@ RGBController_KBHE::RGBController_KBHE(KBHEController* device_controller) : cont
 RGBController_KBHE::~RGBController_KBHE()
 {
     Shutdown();
+    // The final core buffer can be newer than the last HID write. Shutdown has
+    // joined that producer and holds AccessMutex, so inspect it directly here.
+    if(keep_black_on_exit && active_mode == 0 && !colors.empty() &&
+       std::all_of(colors.begin(), colors.end(), [](RGBColor color) {
+           return RGBGetRValue(color) == 0 && RGBGetGValue(color) == 0 && RGBGetBValue(color) == 0;
+       }))
+    {
+        if(!controller->KeepBlackOnExit()) ReportError();
+        else if(controller->GetRestorationResult() == "black_exit_confirmed")
+            LOG_INFO("[KBHE] Black exit confirmed (82-key RGB readback)");
+        else
+            LOG_WARNING("[KBHE] Black exit not applied: %s", controller->GetRestorationResult().c_str());
+    }
     delete controller;
 }
 

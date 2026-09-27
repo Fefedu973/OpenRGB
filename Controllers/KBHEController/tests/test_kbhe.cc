@@ -231,10 +231,54 @@ static void LiveRestorationRequiresExactReadback()
     device.corrupt_restore_readback=false;
     assert(controller.RestoreHardware());assert(device.live==Gradient());
 }
+static void BlackExit()
+{
+    hid_device_ device;
+    {
+        KBHEController controller(&device,"mock","unit",true);
+        assert(controller.Probe()&&controller.EnterDirectMode());
+        assert(controller.SendFrame(Gradient()));
+        const auto count=Count(device,0x6A);
+        // The final core color is black but no ordinary SendFrame delivered it.
+        assert(controller.KeepBlackOnExit());
+        assert(device.live==Frame{} && Count(device,0x6A)==count+5 && Count(device,0x68)==5);
+        assert(controller.GetRestorationResult()=="black_exit_confirmed");
+    }
+    assert(device.closed==1 && device.mode==LIVE_MODE && Count(device,0x76)==0 && device.live==Frame{});
+    hid_device_ external;
+    {
+        KBHEController controller(&external,"mock","unit",true);
+        assert(controller.Probe()&&controller.EnterDirectMode());external.mode=3;
+        assert(controller.KeepBlackOnExit());
+        assert(controller.GetRestorationResult()=="external_mode_preserved");
+    }
+    assert(external.mode==3&&Count(external,0x6A)==0&&Count(external,0x76)==0);
+    hid_device_ disconnected;
+    {
+        KBHEController controller(&disconnected,"mock","unit",true);
+        assert(controller.Probe()&&controller.EnterDirectMode());disconnected.short_write=true;
+        const auto count=disconnected.writes.size();
+        assert(!controller.KeepBlackOnExit());
+        assert(disconnected.writes.size()==count+1 && controller.GetRestorationResult()=="black_exit_unconfirmed");
+    }
+    assert(disconnected.closed==1 && Count(disconnected,0x76)==0);
+    hid_device_ mismatch;
+    {
+        KBHEController controller(&mismatch,"mock","unit",true);
+        assert(controller.Probe()&&controller.EnterDirectMode());mismatch.corrupt_restore_readback=true;
+        assert(!controller.KeepBlackOnExit());
+        assert(controller.GetLastError().find("readback differs")!=std::string::npos);
+    }
+    assert(Count(mismatch,0x76)==0);
+    hid_device_ untouched;
+    {KBHEController controller(&untouched,"mock","unit",true);assert(controller.KeepBlackOnExit());}
+    assert(untouched.writes.empty()&&untouched.closed==1);
+}
 int main()
 {
     FramingAndLayout();ProbeAndRestore();FaultsAndExternalMode();SerializedFrames();
     ExistingLiveSnapshotAndRestore();RestoreObservedModeAndRetryEnable();RejectIncompleteInitialLiveSnapshot();
     LiveRestorationRequiresExactReadback();
+    BlackExit();
     std::cout<<"KBHE framing, 82-key geometry, capabilities, legacy identity, matching ACKs, bounded failures, mode restoration, orphan-live snapshot/readback, retry enable and serialized frames: PASS\n";
 }

@@ -18,6 +18,7 @@ struct Configuration
     std::string name;
     std::string serial;
     std::optional<bool> power_on_acquire;
+    bool keep_black_on_exit = false;
     bool PowerOnAcquire() const { return power_on_acquire.value_or(profile == Profile::H6008); }
 };
 
@@ -26,6 +27,7 @@ class Controller
 public:
     explicit Controller(Configuration configuration);
     ~Controller();
+    void Stop(bool requested_black = false);
     void Submit(Frame frame);
     std::string Name() const { return configuration.name; }
     std::string Serial() const { return configuration.serial; }
@@ -37,6 +39,7 @@ private:
     std::condition_variable wake;
     std::thread worker;
     std::atomic<bool> stopping{false};
+    std::atomic<bool> final_black{false};
     Frame latest{};
     bool have_frame = false;
 };

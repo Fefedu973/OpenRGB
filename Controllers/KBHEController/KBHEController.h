@@ -16,6 +16,7 @@ public:
     bool EnterDirectMode();
     bool SendFrame(const KBHEProtocol::Frame& frame);
     bool RestoreHardware();
+    bool KeepBlackOnExit();        // Existing live ownership only; no EEPROM writes.
     const std::string& GetVersion() const { return version; }
     const std::string& GetSerial() const { return serial; }
     std::string GetLocation() const { return "HID: " + path; }

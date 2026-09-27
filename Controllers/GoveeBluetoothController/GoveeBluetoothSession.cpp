@@ -203,9 +203,22 @@ void Session::Step(const Frame& frame, uint64_t now_ms)
     state = "streaming";
 }
 
-void Session::Release()
+void Session::Release(bool keep_black)
 {
     state = "releasing";
+    if(keep_black)
+    {
+        // Explicit exit policy supersedes the startup snapshot. Do not acquire
+        // or reconnect a light while shutting down, or restore it ON on failure.
+        state = "black_exit_unconfirmed";
+        if(acquired && transport.Connected())
+        {
+            SetPower(false); // ATT acknowledgement plus AA01 application readback.
+            state = "black_exit_confirmed";
+        }
+        transport.Disconnect();
+        return;
+    }
     if(snapshot_valid && modified && transport.Connected())
     {
         // Only an initially OFF H6008 explicitly turned ON by this acquisition

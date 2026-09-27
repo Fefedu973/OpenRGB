@@ -39,7 +39,17 @@ RGBController_GoveeBluetooth::RGBController_GoveeBluetooth(GoveeBluetooth::Confi
 RGBController_GoveeBluetooth::~RGBController_GoveeBluetooth()
 {
     Shutdown();
-    // Controller destructor stops its worker and performs a bounded restoration.
+    // Shutdown joined the core producer and holds AccessMutex. Read the actual
+    // final buffer, not the BLE worker's possibly older last-delivered frame.
+    bool requested_black = false;
+    if(!colors.empty() && active_mode < modes.size())
+    {
+        const mode& current = modes[active_mode];
+        const RGBColor color = current.value == 1 && !current.colors.empty() ? current.colors[0] : colors[0];
+        requested_black = current.brightness == 0 ||
+            (RGBGetRValue(color) == 0 && RGBGetGValue(color) == 0 && RGBGetBValue(color) == 0);
+    }
+    controller.Stop(requested_black);
 }
 
 void RGBController_GoveeBluetooth::SetupZones()

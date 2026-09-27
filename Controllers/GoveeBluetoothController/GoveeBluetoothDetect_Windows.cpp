@@ -33,6 +33,9 @@ DetectedControllers DetectGoveeBluetoothControllers()
     schema["config_file"] = {{"type", "string"}, {"default", ""},
         {"title", "Govee Bluetooth private configuration"},
         {"description", "Absolute path to the manually allowlisted BLE devices JSON; never include keys in OpenRGB settings."}};
+    schema["keep_black_on_exit"] = {{"type", "bool"}, {"default", false},
+        {"title", "Keep black when closing"},
+        {"description", "When the final requested color is black, confirm power OFF instead of restoring the startup snapshot. Other colors retain normal restoration. Never reconnect during shutdown."}};
     manager->RegisterSettingsSchemaLocalOnly("GoveeBluetooth", "Govee Bluetooth", schema);
     const json settings = manager->GetSettings("GoveeBluetooth");
     if(!settings.is_object() || !settings.contains("config_file") || !settings["config_file"].is_string() || settings["config_file"] == "")
@@ -53,6 +56,7 @@ DetectedControllers DetectGoveeBluetoothControllers()
                 if(!item.is_object()) throw std::invalid_argument("Device configuration is not an object");
                 if(!item.value("enabled", true)) continue;
                 GoveeBluetooth::Configuration device;
+                device.keep_black_on_exit = settings.value("keep_black_on_exit", false);
                 const auto profile = item.at("profile").get<std::string>();
                 if(profile == "h6008-realtime-v1") device.profile = GoveeBluetooth::Profile::H6008;
                 else if(profile == "h6159-classic-v1") device.profile = GoveeBluetooth::Profile::H6159;

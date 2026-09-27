@@ -359,7 +359,13 @@ public:
         if(header.timestamp_ms>now) { error="Invalid future frame timestamp";return FrameStatus::Invalid; }
         if(now-header.timestamp_ms>ttl_ms) { error="Frame TTL expired";return FrameStatus::Stale; }
         if(header.generation==last_generation && header.sequence==last_sequence)
-        { error.clear();return FrameStatus::Unchanged; }
+        {
+            // A healthy static-image producer may refresh only its timestamp.
+            // Expose that validated heartbeat without allocating/copying pixels
+            // or changing the generation/sequence used by renderer upload caches.
+            frame.timestamp_ms=header.timestamp_ms;
+            error.clear();return FrameStatus::Unchanged;
+        }
         // Allocate only after validating format, arithmetic and actual mapped capacity.
         frame.bgra.resize(static_cast<std::size_t>(header.payload_bytes));
         std::memcpy(frame.bgra.data(),view+HEADER_BYTES,frame.bgra.size());

@@ -74,6 +74,34 @@ static void TestLatestAndReconnect()
     auto image=Image(800,600,7);Check(replacement.PublishBGRA(image.data(),image.size(),800,600,3200),"Replacement publish failed");
     Check(reader.ReadLatest(frame)==FrameStatus::NewFrame && frame.sequence==1 && frame.generation!=old_generation,"Reconnected sequence was mistaken for old frame");
 }
+static void TestTimestampOnlyHeartbeat()
+{
+    const auto channel=Channel("heartbeat");Publisher publisher(channel,1024);Reader reader(channel);Frame frame;
+    auto image=Image(4,4,8);Check(publisher.PublishBGRA(image.data(),image.size(),4,4,16),"Heartbeat fixture publish failed");
+    Check(reader.ReadLatest(frame,80)==FrameStatus::NewFrame,"Heartbeat fixture read failed");
+    const auto generation=frame.generation,sequence=frame.sequence,initial_stamp=frame.timestamp_ms;
+    const auto* pixels=frame.bgra.data();frame.bgra[0]=42; // prove Unchanged does not recopy the payload
+    HANDLE mapping=OpenFileMappingW(FILE_MAP_ALL_ACCESS,FALSE,detail::Name(channel,false).c_str());
+    auto* header=static_cast<Header*>(MapViewOfFile(mapping,FILE_MAP_ALL_ACCESS,0,0,HEADER_BYTES+1024));
+    HANDLE mutex=OpenMutexW(SYNCHRONIZE|MUTEX_MODIFY_STATE,FALSE,detail::Name(channel,true).c_str());
+    Check(mapping && header && mutex,"Heartbeat fixture mapping failed");
+    std::uint64_t stamp=initial_stamp;
+    for(unsigned i=0;i<7;++i)
+    {
+        std::this_thread::sleep_for(30ms);
+        {detail::Lock lock(mutex,100);Check(lock.acquired,"Heartbeat fixture mutex failed");stamp=header->timestamp_ms=GetTickCount64();}
+        Check(reader.ReadLatest(frame,80)==FrameStatus::Unchanged,"Timestamp-only heartbeat was not Unchanged");
+        Check(frame.timestamp_ms==stamp && frame.sequence==sequence && frame.generation==generation,"Heartbeat metadata not refreshed exactly");
+        Check(frame.bgra.data()==pixels && frame.bgra[0]==42,"Heartbeat recopied pixels");
+    }
+    Check(stamp-initial_stamp>160,"Heartbeat did not exercise more than two TTL windows");
+    {detail::Lock lock(mutex,100);Check(lock.acquired,"Heartbeat fixture mutex failed");header->timestamp_ms=GetTickCount64()+10000;}
+    Check(reader.ReadLatest(frame,80)==FrameStatus::Invalid && frame.timestamp_ms==stamp,"Invalid heartbeat changed cached metadata");
+    {detail::Lock lock(mutex,100);Check(lock.acquired,"Heartbeat fixture mutex failed");header->timestamp_ms=stamp;}
+    std::this_thread::sleep_for(100ms);
+    Check(reader.ReadLatest(frame,80)==FrameStatus::Stale && frame.timestamp_ms==stamp,"Stopped heartbeat renewed freshness");
+    UnmapViewOfFile(header);CloseHandle(mapping);CloseHandle(mutex);
+}
 static void TestCorruptionAndBusy()
 {
     const auto channel=Channel("invalid");Publisher publisher(channel,1024);Reader reader(channel);Frame frame;
@@ -149,6 +177,7 @@ int main(int argc,char** argv)
         TestBounds();std::cout<<"PASS channel/bounds/overflow\n";
         TestPixelFormatAndTtl();std::cout<<"PASS RGB conversion, opaque BGRA, stride and TTL\n";
         TestLatestAndReconnect();std::cout<<"PASS 60 synthetic 800x600 frames, late consumer, no queue, reconnect\n";
+        TestTimestampOnlyHeartbeat();std::cout<<"PASS timestamp-only heartbeat, immutable payload, invalid heartbeat rejection and TTL expiry\n";
         TestCorruptionAndBusy();std::cout<<"PASS invalid headers, bounded allocation and mutex contention\n";
         TestContendedCloseAndSameProcessReopen();std::cout<<"PASS bounded contended Close and same-process owner lifetime\n";
         TestOtherProcess();std::cout<<"PASS real second-process shared memory\n";

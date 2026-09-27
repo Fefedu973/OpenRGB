@@ -24,7 +24,7 @@ Le producteur utilise un seul thread propriétaire. Il conserve l’objet entre 
 
 Le format des pixels est **BGRA8 sRGB, opaque, origine en haut à gauche**, avec un stride explicite. Tous les alpha doivent valoir 255. Le producteur refuse les autres alpha et remet à zéro le padding des lignes ; il ne transmet pas de mémoire de padding du producteur. Une image Qt `Format_ARGB32` sur Windows little-endian convient seulement après vérification/normalisation de son opacité.
 
-`NewFrame` copie la dernière image ; `Unchanged` signifie que la même image est encore fraîche. `Stale`, `Unavailable`, `Invalid` et `Busy` ne fournissent **aucune autorisation de rejouer** le contenu précédent de `frame`, laissé intact. Le consommateur doit respecter ces résultats et son propre bail de sortie. La génération change après une réouverture du producteur, même si la séquence redémarre à 1.
+`NewFrame` copie la dernière image ; `Unchanged` signifie que la même image est encore fraîche et actualise `frame.timestamp_ms` depuis l'en-tête validé, sans recopier les pixels ni modifier génération/séquence. Un producteur peut rafraîchir ce timestamp sous le mutex pour signaler sa santé même si l'image reste statique ; ce heartbeat ne représente pas une nouvelle capture. Un consommateur avec son propre TTL doit recalculer son échéance depuis ce timestamp, et non depuis la date de lecture. `Stale`, `Unavailable`, `Invalid` et `Busy` ne fournissent **aucune autorisation de rejouer** le contenu précédent de `frame`, laissé intact. Le consommateur doit respecter ces résultats et son propre bail de sortie. La génération change après une réouverture du producteur, même si la séquence redémarre à 1.
 
 ## Contrat binaire et bornes
 
@@ -39,5 +39,7 @@ La capacité ne grandit pas tant que des lecteurs conservent l’ancien mapping.
 ## Tests hors matériel
 
 `tests/Build-Tests.cmd` compile et lance avec MSVC 2022. Les tests créent des noms de canaux uniques et des images synthétiques : 60 images 800 × 600 à une cadence demandée de 60 Hz, lecteur tardif recevant la seule séquence 60, BGRA/RGB et padding, TTL, seconde instance de processus, refus d’un producteur concurrent, reconnexion, en-tête corrompu, tailles excessives et contention. Ce test ne mesure ni une capture réelle à 60 Hz ni un écran physique.
+
+Un test renouvelle uniquement le timestamp pendant plus de deux TTL : la séquence, la génération et le buffer du lecteur restent identiques. Un timestamp futur est refusé sans modifier la trame, puis l'arrêt du heartbeat produit bien `Stale`. Le format binaire ORGBFRM1 v1 reste inchangé.
 
 Le contrôleur Stream Deck peut lire ce transport via `StreamDeckBackground.frame_surface` ; voir `tests/room-streamdeck/README.md`. Aucun adaptateur wallpaper ni compositeur GPU n’est implémenté par ce header.

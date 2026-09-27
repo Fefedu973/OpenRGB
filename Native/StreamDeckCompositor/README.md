@@ -6,7 +6,7 @@ Ce module optionnel Windows x64 remplace le serveur Python/HTTP par **Frida Core
 
 Le test physique **antérieur au correctif des cases vides**, sur une page peuplée, a produit 126 images 800 × 600 sur huit secondes : 126 notifications acquittées, 1890 peintures couvrant les quinze touches, zéro erreur, environ 16 images/s réelles pour un plafond de 20. La latence d'acquittement avait un p95 de 7 ms. La restauration normale a été acquittée et le détachement terminé. L'utilisateur a également confirmé visuellement le fond animé natif et les quinze icônes correctes. Ces mesures ne validaient pas les cases sans action : leur défaut a été signalé ensuite sur une autre page.
 
-### Cases sans action : validation native sur la page Lights
+### Cases sans action : cache encodé identifié, validation visuelle à renouveler
 
 Le slot d'animation natif ignorait les coordonnées absentes de sa table d'actions,
 même si notre notification demandait les quinze indices. Le correctif utilise,
@@ -29,8 +29,29 @@ correction de cette branche, le test réel de vingt secondes a soumis et acquitt
 vides**, quinze fonds injectés et zéro erreur. Le p95 d'acquittement était de
 2 ms ; la cadence moyenne de soumission/acquittement était de 15,75 images/s
 pour un plafond de 20. La restauration native et le détachement ont réussi.
-Le processus Elgato est resté ouvert. La validation optique par l'utilisateur
-et une navigation complète entre pages restent distinctes de ces compteurs.
+Le processus Elgato est resté ouvert. **L'utilisateur a ensuite confirmé que
+les cases vides restaient noires.** Ces compteurs prouvaient une peinture dans
+les QImage temporaires, pas que leur contenu avait été transmis aux LCD.
+
+La lecture du binaire épinglé explique cet écart : le descripteur `Image_t`
+conserve un sélecteur de cache à `+0x18`. La tâche `ESDCommUploadXIconTask`
+le copie à `+0x48` et, s'il est positif, transmet l'image déjà encodée en cache
+avant de lire la QImage. La branche de rendu forcé des actions met déjà ce
+sélecteur à zéro (`0x5c8b51`) ; la branche sans couche active (`0x5c8b95`) le
+conservait. Le nouveau correctif le met à zéro **uniquement dans le descripteur
+temporaire dont nous venons de peindre le fond**. Le cache et le bundle d'origine
+restent inchangés. La restauration reprend leur chemin natif avec le sélecteur
+original. Dans le cas sans bundle, où le descripteur natif est entièrement nul,
+la copie peinte reçoit également l'indice de destination demandé au factory.
+Deux signatures supplémentaires vérifient la remise à zéro native et le test
+de cache de l'upload (`0x60ed0a`) avant tout hook. Aucun nouvel attachement ni
+nouvelle fonction native appelée ne sont nécessaires.
+
+Les tests simulent désormais cette décision d'upload, y compris un JPEG vide
+déjà en cache : peindre une QImage seule ne suffit plus à les faire réussir.
+Ils vérifient aussi les quinze destinations sans bundle et le maintien de
+l'identité de cache lors de la restauration. **Le correctif de cache reste à
+valider sur les touches physiques et lors d'une navigation entre pages.**
 
 `lastFrameCoverage` rapporte les nombres `rendered`, `injected`, `empty` et
 `actions` **pour la dernière image**, avec son numéro et son état `restore`.

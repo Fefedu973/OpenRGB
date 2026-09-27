@@ -9,7 +9,7 @@ const source=fs.readFileSync(require('node:path').join(__dirname,'background-cor
 
 function fixture(options={}) {
  const memory=[],hooks=new Map(),replacements=new Map(),functions=new Map(),events=[],queue=[];
- let address=0x200000000,now=1000,timer,originalCalls=0,gridCalls=0,output=[];
+ let address=0x200000000,now=1000,timer,originalCalls=0,gridCalls=0,output=[],descriptors=[],uploaded=[];
  class Pointer {
   constructor(n){this.n=n instanceof Pointer?n.n:Number(n);}
   add(n){return ptr(this.n+Number(n));}sub(n){return ptr(this.n-Number(n instanceof Pointer?n.n:n));}
@@ -76,9 +76,12 @@ function fixture(options={}) {
  functions.set(exe.base.add(0x5c8a80).toString(),(bundle,out,unused,flags)=>{
   assert(flags.toInt32()&1,'tagged action rendering must be synchronous');
   const image=out.add(0x20);image.add(16).writePointer(blank);
+  out.writeU64(bundle.readU64().toNumber());out.add(0x18).writeU64(123456);
   if(options.inactiveBundles?.includes(bundle.readU64().toNumber())){
    point(0x5c8b95,{rdi:bundle});return out;
   }
+  // Native forced foreground rendering clears Image_t's encoded cache selector.
+  out.add(0x18).writeU64(0);
   if(options.missedAction!==bundle.readU64().toNumber())invoke(exe.base.add(0x5c8550),[bundle,image]);
   // Native icon/title overlay comes AFTER our pre-overlay background hook.
   const p=detach(image);p.writeByteArray(Buffer.from([251,252,253,255]));return out;
@@ -92,11 +95,16 @@ function fixture(options={}) {
   return out;
  });
  functions.set(exe.base.add(0x4164a0).toString(),(o,flags)=>{
-  assert(o.equals(owner));assert.equal(flags,0x20010);gridCalls++;output=[];
+  assert(o.equals(owner));assert.equal(flags,0x20010);gridCalls++;output=[];descriptors=[];uploaded=[];
   for(let key=0;key<15;key++){
    if(options.skip===key)continue;
    const out=alloc(128);invoke(exe.base.add(0x5c52b0),[composer,out,ptr(key),ptr(0)]);
-   const image=out.add(0x20);output[key]=image.add(16).readPointer().isNull()?null:Buffer.from(pixels(image).readByteArray(20736));
+   const image=out.add(0x20),cache=out.add(0x18).readU64().toNumber(),destination=out.readU64().toNumber();
+   // Model UploadXIconTask, not just the modified QImage: a positive selector
+   // uses a pre-existing encoded blank and skips the painted pixels entirely.
+   const rendered=image.add(16).readPointer().isNull()?null:Buffer.from(pixels(image).readByteArray(20736));
+   output[key]=cache>0?Buffer.from(pixelStorage.get(blank.n).readByteArray(20736)):rendered;
+   descriptors[key]={cache,destination};uploaded[destination]=output[key];
   }
  });
  const sandbox={Process:{mainModule:exe,arch:'x64',id:1,getModuleByName:n=>Object.values(modules).find(m=>m.name===n),getCurrentThreadId:()=>77},
@@ -110,7 +118,7 @@ function fixture(options={}) {
   colors(){sandbox.rpc.exports.setcolors(Array.from({length:15},()=>[100,50,25]),2000);},
   untagged(){invoke(exe.base.add(0x419a80),[owner,alloc(24)]);},
   setActions(keys){actions=new Set(keys);},expireTarget(){owner.writePointer(ptr(0));},
-  get output(){return output;},get originalCalls(){return originalCalls;},get gridCalls(){return gridCalls;},
+  get output(){return output;},get descriptors(){return descriptors;},get uploaded(){return uploaded;},get originalCalls(){return originalCalls;},get gridCalls(){return gridCalls;},
   get blank(){return Buffer.from(pixelStorage.get(blank.n).readByteArray(20736));}
  };
 }
@@ -130,7 +138,10 @@ test('empty page is naturally discoverable and full image uses each distinct til
  const f=fixture({actions:[]});assert.equal(f.rpc.status().ready,false);f.naturalEmpty();assert.equal(f.rpc.status().ready,true);
  const bytes=new Uint8Array(311040);for(let i=0;i<bytes.length;i+=4){bytes[i]=Math.floor(i/20736);bytes[i+3]=255;}
  f.rpc.setframe(2000,bytes.buffer);f.tick();f.drain();assert.equal(f.rpc.status().lastFrameCoverage.empty,15);
- for(let i=0;i<15;i++)assert.deepEqual([...f.output[i].subarray(0,4)],[i,0,0,255]);
+ for(let i=0;i<15;i++){
+  assert.deepEqual([...f.uploaded[i].subarray(0,4)],[i,0,0,255]);
+  assert.deepEqual(f.descriptors[i],{cache:0,destination:i});
+ }
 });
 test('page changes re-evaluate empty/action coverage, native restore renders all 15',()=>{
  const f=fixture();f.naturalEmpty();f.colors();f.tick();f.drain();f.setActions([1,3]);f.colors();f.tick();f.drain();
@@ -145,9 +156,15 @@ test('empty cells retaining inactive bundles use the positive no-layer branch',(
  const f=fixture({actions:Array.from({length:15},(_,i)=>i),inactiveBundles:[8,9,10,11,12,13,14]});
  f.naturalEmpty();f.colors();f.tick();f.drain();const s=f.rpc.status();
  assert.equal(s.errors,0);assert.equal(s.acknowledged,1);assert.equal(s.lastFrameCoverage.injected,15);assert.equal(s.lastFrameCoverage.empty,7);
- for(let i=8;i<15;i++)assert.deepEqual([...f.output[i].subarray(0,4)],[25,50,100,255]);
+ for(let i=8;i<15;i++){
+  assert.deepEqual([...f.output[i].subarray(0,4)],[25,50,100,255]);
+  assert.deepEqual(f.descriptors[i],{cache:0,destination:i},'painted temporary descriptor bypasses encoded cache');
+ }
  f.rpc.stop();f.tick();f.drain();assert.equal(f.rpc.status().restores,1);
- for(let i=8;i<15;i++)assert.deepEqual(f.output[i],f.blank);
+ for(let i=8;i<15;i++){
+  assert.deepEqual(f.output[i],f.blank);
+  assert.deepEqual(f.descriptors[i],{cache:123456,destination:i},'restore retains native encoded-cache identity');
+ }
 });
 for(const [label,options] of [['missing cell',{skip:14}],['missing action callback',{missedAction:0}],['null image',{badImage:1}],['invalid stride',{badStride:1}]])
  test(label+' cannot acknowledge a complete frame',()=>{
@@ -162,5 +179,5 @@ test('stop while queued and lease expiry render only native restore',()=>{
   assert.equal(f.rpc.status().paints,0);assert.equal(f.rpc.status().restores,1);assert.deepEqual(f.output[0],f.blank);}
 });
 test('exact new native entry/branch guards reject before any interceptor',()=>{
- for(const rva of [0x4164a0,0x5c52b0,0x5c544e,0x5c8b95])assert.throws(()=>fixture({badGuard:rva}),/Unsupported code/);
+ for(const rva of [0x4164a0,0x5c52b0,0x5c544e,0x5c8b95,0x5c8b51,0x60ed0a])assert.throws(()=>fixture({badGuard:rva}),/Unsupported code/);
 });

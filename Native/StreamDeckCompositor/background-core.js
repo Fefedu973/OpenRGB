@@ -65,6 +65,10 @@ check(exe,0x5c52b0,'48895c242055565741564157');
 check(exe,0x5c544e,'0f57c00f11070f114710488d9680000000');
 check(exe,0x5c8a80,'48895c242055565741564157');
 check(exe,0x5c8b95,'488d5f10488bcbff15de527800');
+// Image_t +0x18 is the encoded-image cache selector. These two instructions
+// prove the forced action path clears it and the upload task tests it.
+check(exe,0x5c8b51,'4c897dbf488d7710');
+check(exe,0x60ed0a,'4d3966480f8ea0000000');
 check(gui,0x43970,'405355564883ec50');
 check(gui,0x3ab50,'40534883ec204883791000');
 const activate=new NativeFunction(core.getExportByName('?activate@QMetaObject@@SAXPEAVQObject@@PEBU1@HPEAPEAX@Z'),'void',['pointer','pointer','int','pointer'],'win64');
@@ -198,7 +202,17 @@ Interceptor.attach(exe.base.add(0x5c52b0),{onEnter(a){
   if(!validTileImage(image))throw Error('Invalid factory tile');
   if(call.blank){
    frame.empty.add(call.key);
-   if(!frame.restore)paintTile(image,call.key,frame);
+   if(!frame.restore){
+    paintTile(image,call.key,frame);
+    // The native no-layer path retains Image_t's encoded-image cache selector.
+    // UploadXIconTask copies it to +0x48 and sends the cached JPEG before reading
+    // QImage. Match the forced action path: bypass that cache on THIS temporary
+    // descriptor only. Never alter a bundle or the persistent encoded cache.
+    call.out.add(0x18).writeU64(0);
+    // The positively identified no-bundle branch zeroes the entire descriptor,
+    // including its destination key. Supply the known key for this painted copy.
+    if(!call.bundle)call.out.writeU64(call.key);
+   }
   }
   frame.rendered.add(call.key);
  }catch(e){

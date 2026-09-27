@@ -100,6 +100,17 @@ de santé/JSON/script/détachement, la borne des tentatives et un nouveau PID.
 Aucun processus Elgato ni Frida n'est utilisé par ce test. Ce test ne démontre
 pas la récupération de l'incident réel dont les requêtes de santé échouaient.
 
+Après installation du core et de la DLL native diagnostique, puis redémarrage
+d'OpenRGB, la connexion au processus Elgato déjà ouvert a été rétablie. Une
+composition de page a permis la découverte du compositeur : les ACK observés
+ont progressé de 62 à 1063, avec quinze fonds injectés par image et `errors=0`.
+La dernière fenêtre de dix secondes est passée de 910 à 1063 ACK, sans nouvelle
+erreur. Les 77 fichiers de configuration vérifiés avant/après la copie étaient
+identiques. La DLL native installée a le SHA256
+`A25D7089B2BBF33A218BC71C2703180990A4EE951813A9EB5B87A98D65BECF95`.
+Cette reprise confirme le fonctionnement après redémarrage du propriétaire,
+pas la cause du blocage précédent ni une validation d'endurance prolongée.
+
 `lastFrameCoverage` rapporte les nombres `rendered`, `injected`, `empty` et
 `actions` **pour la dernière image**, avec son numéro et son état `restore`.
 L'ACK exige quinze images natives valides et quinze injections ; une restauration

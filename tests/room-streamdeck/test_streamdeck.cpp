@@ -463,6 +463,23 @@ int main()
         Check(aggregate.at("ready")==true && aggregate.at("paints")==150,"Aggregate counters missing");
         Check(!aggregate.contains("tiles") && !aggregate["lastFrameCoverage"].contains("pixels"),"Pixel data escaped into metadata");
         Check(aggregate["pacing"]["ackLatencyMs"].size()==1 && aggregate.at("fault").get<std::string>().size()==512,"Unbounded diagnostic field");
+        const auto queued=AggregateCompositorStatus({{"stalled",true},{"queuedStalls",2},{"queueRecoveries",1},
+            {"pendingAgeMs",3500.5},{"pendingEntered",false},{"pendingPhase","queued"},
+            {"nativePointer","0xDEADBEEF"},{"token","not-for-sdk"}});
+        Check(queued.size()==6 && queued.at("stalled")==true && queued.at("queuedStalls")==2 && queued.at("queueRecoveries")==1,
+              "Queue stall aggregate is missing or exposes unrelated fields");
+        Check(queued.at("pendingAgeMs")==3500.5 && queued.at("pendingEntered")==false && queued.at("pendingPhase")=="queued",
+              "Queued diagnostics have changed values");
+        const auto rendering=AggregateCompositorStatus({{"stalled",false},{"pendingEntered",true},{"pendingPhase","rendering"}});
+        Check(rendering.at("pendingPhase")=="rendering" && rendering.at("pendingEntered")==true && rendering.at("stalled")==false,
+              "Rendering phase was not preserved");
+        const auto idle=AggregateCompositorStatus({{"pendingAgeMs",nullptr},{"pendingEntered",false},{"pendingPhase",nullptr}});
+        Check(idle.at("pendingAgeMs").is_null() && !idle.contains("pendingPhase"),"Idle phase must not invent a render state");
+        for(const auto& invalid:std::vector<json>{std::string(10000,'x'),"stopped",123,true,json::array(),json::object()})
+            Check(!AggregateCompositorStatus({{"pendingPhase",invalid}}).contains("pendingPhase"),"Arbitrary phase data escaped into SDK");
+        const auto invalid_scalars=AggregateCompositorStatus({{"stalled",json::object()},{"queuedStalls",json::array()},
+            {"queueRecoveries","secret"},{"pendingAgeMs",json::array()},{"pendingEntered","not-a-scalar-counter"}});
+        Check(invalid_scalars.empty(),"Non-scalar stall payload escaped into SDK");
         Check(AggregateCompositorStatus(json::array()).empty(),"Old/invalid status must remain compatible");
         std::cout << "PASS bounded aggregate compositor metadata without images\n";
         TestOptionsAndImage();std::cout << "PASS configuration, native layout, BGRA and spatial gradients\n";

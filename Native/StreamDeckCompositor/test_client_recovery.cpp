@@ -17,7 +17,41 @@ int main(int argc,char** argv)
         const auto fail=reinterpret_cast<void(*)(int,int,int)>(GetProcAddress(dll,"fixture_failure"));
         const auto count=reinterpret_cast<int(*)(int)>(GetProcAddress(dll,"fixture_count"));
         const auto pid=reinterpret_cast<void(*)(unsigned)>(GetProcAddress(dll,"fixture_pid"));
-        Check(reset&&fail&&count&&pid,"fixture exports");
+        const auto stalled=reinterpret_cast<void(*)(int)>(GetProcAddress(dll,"fixture_stalled"));
+        Check(reset&&fail&&count&&pid&&stalled,"fixture exports");
+        reset();
+        { streamdeck_background::NativeClient client(path,"C:/synthetic",20);
+          Check(client.Request("/health","").value("ready",false),"initial native target ready");
+          stalled(1);
+          for(unsigned i=0;i<5;++i)
+          {
+              const auto status=client.Request("/health","");
+              Check(!status.value("ready",true)&&status.value("errors",-1)==0&&status.value("stalled",false),
+                    "queued stall is a nonfatal status, not an RPC exception");
+              const auto frame=client.Request("/frame","discarded while native queue waits");
+              Check(frame.contains("accepted")&&frame["accepted"]==false&&frame.contains("reason")&&frame["reason"].is_string(),
+                    "stalled frame refusal remains a normal result for controller backoff");
+          }
+          Check(count(0)==1&&count(1)==0&&count(2)==1,"repeated stalls neither close nor attach another observer");
+          Check(count(3)==5&&count(4)==0,"refused stalled frames are not accepted or replayed");
+          Check(client.LastDiagnostics().value("stalled",false),"last diagnostics preserve actual stalled state");
+          stalled(0);
+          const auto status=client.Request("/health","");
+          Check(status.value("ready",false)&&!status.value("stalled",true),"late native completion returns ready on same PID");
+          Check(client.Request("/frame","fresh after native restore").value("accepted",false),"fresh image resumes after stalled state");
+          Check(count(0)==1&&count(1)==0&&count(2)==1&&count(4)==1,"resume retains exactly the original handle without stale replay");
+          Check(client.Close().empty()&&count(1)==1&&count(2)==0,"recovered session closes once normally"); }
+        reset();
+        { streamdeck_background::NativeClient client(path,"C:/synthetic",20);
+          stalled(1);Check(!client.Request("/health","").value("ready",true),"initial stall can remain pending");
+          Check(client.Close().empty()&&count(0)==1&&count(1)==1&&count(2)==0,"stop while stalled still closes original handle exactly once"); }
+        reset();
+        { streamdeck_background::NativeClient client(path,"C:/synthetic",20);
+          stalled(1);client.Request("/health","");
+          fail(4,1,2);Failure([&]{client.Request("/frame","real fault during stall");});
+          Check(count(0)==1&&count(1)==1&&count(2)==0,"real native fault during stall still closes");
+          Check(Failure([&]{client.Request("/health","");}).find("new Elgato process")!=std::string::npos,
+                "real native fault during stall still latches the PID"); }
         for(int type:{1,2})
         {
             reset();

@@ -98,6 +98,7 @@ function fixture(options={}) {
   assert(o.equals(owner));assert.equal(flags,0x20010);gridCalls++;output=[];descriptors=[];uploaded=[];
   for(let key=0;key<15;key++){
    if(options.skip===key)continue;
+   options.duringRender?.({key,rpc:sandbox.rpc.exports,tick(ms){now+=ms;timer();}});
    const out=alloc(128);invoke(exe.base.add(0x5c52b0),[composer,out,ptr(key),ptr(0)]);
    const image=out.add(0x20),cache=out.add(0x18).readU64().toNumber(),destination=out.readU64().toNumber();
    // Model UploadXIconTask, not just the modified QImage: a positive selector
@@ -114,8 +115,8 @@ function fixture(options={}) {
  vm.runInNewContext(source,sandbox,{filename:'background-core.js'});
  function naturalEmpty(){const old=actions;actions=new Set();const out=alloc(128);invoke(exe.base.add(0x5c52b0),[composer,out,ptr(0),ptr(0)]);actions=old;}
  return {rpc:sandbox.rpc.exports,events,naturalEmpty,queue,
-  tick(ms=60){now+=ms;timer();},drain(){assert(queue.length);queue.shift()();},
-  colors(){sandbox.rpc.exports.setcolors(Array.from({length:15},()=>[100,50,25]),2000);},
+  tick(ms=60){now+=ms;timer();},advance(ms){now+=ms;},drain(){assert(queue.length);queue.shift()();},
+  colors(rgb=[100,50,25]){return sandbox.rpc.exports.setcolors(Array.from({length:15},()=>rgb),2000);},
   untagged(){invoke(exe.base.add(0x419a80),[owner,alloc(24)]);},
   setActions(keys){actions=new Set(keys);},expireTarget(){owner.writePointer(ptr(0));},
   get output(){return output;},get descriptors(){return descriptors;},get uploaded(){return uploaded;},get originalCalls(){return originalCalls;},get gridCalls(){return gridCalls;},
@@ -180,4 +181,109 @@ test('stop while queued and lease expiry render only native restore',()=>{
 });
 test('exact new native entry/branch guards reject before any interceptor',()=>{
  for(const rva of [0x4164a0,0x5c52b0,0x5c544e,0x5c8b95,0x5c8b51,0x60ed0a])assert.throws(()=>fixture({badGuard:rva}),/Unsupported code/);
+});
+
+test('queued delay is nonfatal and keeps exactly one Qt notification until native restoration',()=>{
+ const f=fixture();f.naturalEmpty();f.colors();f.tick();const queued=f.queue[0];
+ f.tick(3001);let s=f.rpc.status();
+ assert.equal(s.errors,0);assert.equal(s.ready,false);assert.equal(s.stalled,true);assert.equal(s.armed,false);
+ assert.equal(s.pending,1);assert.equal(s.pendingPhase,'queued');assert.equal(s.pendingEntered,false);assert.equal(s.pendingAgeMs,3001);
+ assert.equal(s.queuedStalls,1);assert.equal(s.abandonedFrames,1);assert.equal(s.restorationPending,true);
+ assert.equal(f.colors().accepted,false);
+ const bytes=new Uint8Array(311040);for(let i=3;i<bytes.length;i+=4)bytes[i]=255;
+ assert.equal(f.rpc.setframe(2000,bytes.buffer).accepted,false);
+ for(let i=0;i<5;i++)f.tick(5000);
+ assert.equal(f.queue.length,1);assert.equal(f.queue[0],queued);assert.equal(f.rpc.status().queuedStalls,1);
+ // A page may have changed while Qt was busy. Restore its CURRENT icons/page.
+ f.setActions([1,3]);f.drain();s=f.rpc.status();
+ assert.equal(s.errors,0);assert.equal(s.ready,true);assert.equal(s.stalled,false);assert.equal(s.armed,false);
+ assert.equal(s.paints,0);assert.equal(s.restores,1);assert.equal(s.queueRecoveries,1);assert.equal(s.pending,null);
+ assert.equal(s.pendingPhase,null);assert.equal(s.pendingAgeMs,null);assert.equal(s.pendingEntered,false);
+ assert.equal(s.lastFrameCoverage.actions,2);assert.equal(s.lastFrameCoverage.injected,0);
+ assert.equal(f.events.filter(e=>e.event==='queue-recovered').length,1);
+ assert.equal(f.events.find(e=>e.event==='queue-recovered').sequence,1);
+ f.tick(5000);assert.equal(f.queue.length,0,'discarded input must never resume by itself');
+ assert.equal(f.colors([10,20,30]).accepted,true);f.tick();f.drain();
+ assert.equal(f.rpc.status().lastFrameCoverage.restore,false);
+ assert.deepEqual([...f.output[0].subarray(0,4)],[30,20,10,255]);
+});
+
+test('explicit stop during a queued stall does not enqueue a second restoration',()=>{
+ const f=fixture({actions:[]});f.naturalEmpty();f.colors();f.tick();f.tick(3001);
+ assert.equal(f.rpc.stop().restorationPending,true);f.tick(5000);assert.equal(f.queue.length,1);
+ f.drain();f.tick();const s=f.rpc.status();
+ assert.equal(s.errors,0);assert.equal(s.restores,1);assert.equal(s.queueRecoveries,1);assert.equal(s.restorationPending,false);
+ assert.equal(f.queue.length,0);assert.deepEqual(f.output[0],f.blank);
+});
+
+test('late callback detects a stalled notification before the timer despite a renewed image lease',()=>{
+ const f=fixture({actions:[]});f.naturalEmpty();f.colors();f.tick();
+ f.advance(2900);assert.equal(f.colors([9,8,7]).accepted,true);f.advance(101);
+ assert.equal(f.rpc.status().queuedStalls,0,'timer has not run');f.drain();const s=f.rpc.status();
+ assert.equal(s.errors,0);assert.equal(s.queuedStalls,1);assert.equal(s.queueRecoveries,1);
+ assert.equal(s.lastFrameCoverage.restore,true);assert.equal(s.paints,0);assert.equal(s.armed,false);
+ f.tick();assert.equal(f.queue.length,0);assert.deepEqual(f.output[0],f.blank);
+ f.colors([1,2,3]);f.tick();f.drain();assert.deepEqual([...f.output[0].subarray(0,4)],[3,2,1,255]);
+});
+
+test('a stalled restoration is retained and recovered without counting an abandoned image',()=>{
+ const f=fixture({actions:[]});f.naturalEmpty();f.colors();f.tick();f.drain();
+ f.rpc.stop();f.tick();f.tick(3001);assert.equal(f.rpc.status().abandonedFrames,0);
+ f.drain();const s=f.rpc.status();assert.equal(s.errors,0);assert.equal(s.queuedStalls,1);assert.equal(s.queueRecoveries,1);
+ assert.equal(s.restores,1);assert.equal(s.lastFrameCoverage.injected,0);
+});
+
+test('lease expiry or stop during rendering never changes half of the current frame',()=>{
+ for(const stop of [false,true]){
+  let entered=false;
+  const f=fixture({duringRender({key,rpc,tick}){
+   if(key!==7||entered)return;entered=true;
+   assert.equal(rpc.status().pendingPhase,'rendering');assert.equal(rpc.status().pendingEntered,true);
+   if(stop)rpc.stop();else tick(2001);
+  }});
+  f.naturalEmpty();f.colors();f.tick();f.drain();let s=f.rpc.status();
+  assert.equal(s.errors,0);assert.equal(s.queuedStalls,0);assert.equal(s.lastFrameCoverage.injected,15);
+  assert.equal(s.lastFrameCoverage.restore,false);assert.equal(s.acknowledged,1);
+  f.tick();f.drain();s=f.rpc.status();assert.equal(s.restores,1);assert.equal(s.lastFrameCoverage.injected,0);
+ }
+});
+
+test('a real render lasting over three seconds remains a fault after completing the native call',()=>{
+ let advanced=false;
+ const f=fixture({duringRender({key,rpc,tick}){
+  if(key!==7||advanced)return;advanced=true;tick(3001);
+  assert.equal(rpc.status().pendingPhase,'rendering');assert.equal(rpc.status().stalled,false);
+  assert.equal(rpc.status().errors,0,'do not alter an in-flight render');
+ }});
+ f.naturalEmpty();f.colors();f.tick();f.drain();const s=f.rpc.status();
+ assert.equal(s.queuedStalls,0);assert.equal(s.queueRecoveries,0);assert.equal(s.lastFrameCoverage.injected,15);
+ assert.equal(s.acknowledged,0);assert.equal(s.ready,false);assert(s.errors>0);
+ assert.match(s.lastFault.message,/Native grid render timeout/);
+ assert.equal(f.events.filter(e=>e.event==='render-overdue').length,1);
+});
+
+test('a target that expires during a queued stall still fails closed',()=>{
+ const f=fixture();f.naturalEmpty();f.colors();f.tick();f.tick(3001);f.expireTarget();f.drain();
+ const s=f.rpc.status();assert(s.errors>0);assert.equal(s.queueRecoveries,0);assert.equal(s.acknowledged,0);assert.equal(f.gridCalls,0);
+});
+
+test('stop then fresh input cannot revive the queued old image',()=>{
+ const f=fixture({actions:[]});f.naturalEmpty();f.colors();f.tick();
+ f.rpc.stop();assert.equal(f.colors([10,20,30]).accepted,true);f.drain();
+ let s=f.rpc.status();assert.equal(s.errors,0);assert.equal(s.paints,0);assert.equal(s.restores,1);
+ assert.deepEqual(f.output[0],f.blank);assert.equal(f.queue.length,0);
+ f.tick();f.drain();s=f.rpc.status();assert.equal(s.lastFrameCoverage.restore,false);assert.equal(s.paints,15);
+ assert.deepEqual([...f.output[0].subarray(0,4)],[30,20,10,255]);
+});
+
+test('expired image lease cannot be renewed retroactively while queued',()=>{
+ for(const timerRan of [false,true]){
+  const f=fixture({actions:[]});f.naturalEmpty();f.colors();f.tick();
+  if(timerRan)f.tick(2001);else f.advance(2001);
+  assert.equal(f.colors([11,22,33]).accepted,true);f.drain();let s=f.rpc.status();
+  assert.equal(s.errors,0);assert.equal(s.paints,0);assert.equal(s.restores,1);assert.equal(s.queuedStalls,0);
+  assert.deepEqual(f.output[0],f.blank);
+  f.tick();f.drain();s=f.rpc.status();assert.equal(s.lastFrameCoverage.restore,false);assert.equal(s.paints,15);
+  assert.deepEqual([...f.output[0].subarray(0,4)],[33,22,11,255]);
+ }
 });

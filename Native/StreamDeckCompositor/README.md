@@ -111,6 +111,47 @@ identiques. La DLL native installée a le SHA256
 Cette reprise confirme le fonctionnement après redémarrage du propriétaire,
 pas la cause du blocage précédent ni une validation d'endurance prolongée.
 
+### Retard de notification Qt : reprise sans détachement
+
+Un incident ultérieur de la même journée a fourni une cause différente et
+précise : après **46 019 images acquittées**, le watchdog JavaScript a déclaré
+`Native queued frame timeout; bridge stopped` pour la notification 46 020.
+Le RPC suivant répondait en 2 ms ; ce n'était donc pas un timeout du transport
+RPC. La dernière image terminée couvrait les quinze touches (dix actions, cinq
+cases vides), avec un p95 d'acquittement antérieur de 2 ms. Le watchdog de trois
+secondes, hérité de la première version native, transformait ce simple retard
+en faute mémorisée, puis le client fermait et verrouillait le PID. La cause
+externe du retard Elgato n'est pas établie par ces traces.
+
+Le correctif distingue une notification **encore en file Qt** d'un rendu natif
+déjà commencé. Après trois secondes en file, il conserve la même session et la
+même notification, suspend les nouvelles images et expose un état `stalled`
+sans erreur native. Il ne supprime pas la notification et n'en poste pas une
+deuxième. Quand elle arrive, elle restaure uniquement le fond natif ; une
+nouvelle image fraîche est nécessaire pour reprendre l'animation. Les anciennes
+couleurs ne sont donc pas rejouées. Sans retour de Qt, l'état reste en attente,
+avec une mémoire et une file bornées ; il ne prétend pas réparer un Elgato
+définitivement bloqué. Un rendu déjà commencé n'est jamais transformé en
+restauration au milieu de sa composition.
+
+Les signatures, durées de bail, contrôles de cible, d'image, de couverture et
+les erreurs natives réelles restent protégés. Le correctif ne rajoute ni boucle
+d'attachement ni serveur externe. Les tests isolés retardent volontairement la
+notification au-delà de trois secondes, vérifient la restauration tardive et
+la reprise avec une image fraîche sur le même handle. Une nouvelle observation
+longue reste nécessaire pour confirmer le comportement sur l'incident réel.
+
+Validation avant installation : **21 tests du vrai script** sous mémoire Qt
+simulée, **63 assertions du vrai client** contre une DLL C ABI de test, suite
+complète du contrôleur et compilation core réussis. Le test Frida utilise
+uniquement son propre processus enfant synthétique : vingt images binaires,
+arrêt/restauration et détachement validés. Les 2 000 réponses RPC concurrentes
+passent également. L'arrêt suivi d'un nouveau bail et l'expiration suivie d'un
+réarmement sont testés : ils ne réactivent jamais l'ancienne image en file.
+Le SDK expose `stalled`, `queuedStalls`, `queueRecoveries`, `pendingAgeMs`,
+`pendingEntered` et une phase bornée à `queued`/`rendering` ; aucune image ni
+adresse mémoire ne passe dans ces diagnostics.
+
 `lastFrameCoverage` rapporte les nombres `rendered`, `injected`, `empty` et
 `actions` **pour la dernière image**, avec son numéro et son état `restore`.
 L'ACK exige quinze images natives valides et quinze injections ; une restauration

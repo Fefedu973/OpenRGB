@@ -9,6 +9,7 @@ if(Process.mainModule.name.toLowerCase()!=='streamdeck.exe'||exe.path.replace(/\
 const meta=exe.base.add(0x1578290),start=Date.now();
 let target=null,armed=false,deadline=0,dirty=false,restore=false,colors=null,tiles=null;
 let pending=null,sequence=0,lastQueued=0,errors=0,compositions=0,paints=0,acknowledged=0,restores=0,rejectedCandidates=0;
+let stalled=false,queuedStalls=0,queueRecoveries=0,abandonedFrames=0;
 // BEGIN FRAME PACING
 class FramePacing {
  constructor(maxFps=20,now=Date.now()){this.maxFps=maxFps;this.nextAt=0;this.reset(now);}
@@ -131,18 +132,30 @@ Interceptor.replace(exe.base.add(0x419a80),new NativeCallback((owner,vector)=>{
  const frame=pending,tid=Process.getCurrentThreadId();
  try{
   if(errors||!validTarget(target))throw Error('Tagged target expired or faulted');
+  // The queued callback may win the race against the 5ms timer after Qt wakes.
+  // A renewed global lease must never make this old notification paint again.
+  const enteredAt=Date.now();
+  if(enteredAt-frame.at>3000)stallQueuedFrame(frame,enteredAt);
   // A queued image must not repaint after stop/lease expiry. Render the native
   // page instead, through the same complete route used by explicit restoration.
-  if(!armed||Date.now()>=deadline){frame.restore=true;restore=false;}
+  if(frame.stalled||!armed||enteredAt>=deadline||enteredAt>=frame.leaseDeadline){frame.restore=true;restore=false;}
+  // From this point the render owns an immutable choice of pixels/restoration.
+  // A timer, stop RPC or lease expiry must not change half of a 15-key frame.
+  frame.phase='rendering';frame.renderAt=enteredAt;
   frame.rendered=new Set();frame.injected=new Set();frame.empty=new Set();
   nativeThreads.add(tid);activeFrames.set(tid,frame);
   renderGrid(owner,0x20010);
   lastFrameCoverage={sequence:frame.sequence,restore:frame.restore,rendered:frame.rendered.size,
    injected:frame.injected.size,empty:frame.empty.size,actions:frame.rendered.size-frame.empty.size};
+  if(frame.renderOverdue||Date.now()-frame.renderAt>3000)throw Error('Native grid render timeout; bridge stopped');
   if(errors||!validTarget(target)||frame.rendered.size!==15||(!frame.restore&&frame.injected.size!==15))
    throw Error('Incomplete native grid: '+JSON.stringify(lastFrameCoverage));
   acknowledged++;if(frame.restore)restores++;
   pacing.ack(frame,Date.now());
+  if(frame.stalled){
+   stalled=false;queueRecoveries++;
+   emit('queue-recovered',{sequence:frame.sequence,waitMs:Math.max(0,frame.renderAt-frame.at),restored:true});
+  }
   if(acknowledged<=3||acknowledged%100===0)emit('frame-ack',{...lastFrameCoverage,latencyMs:Date.now()-frame.at});
  }catch(e){fail(e);}
  finally{activeFrames.delete(tid);if(pending===frame)pending=null;}
@@ -154,7 +167,7 @@ function queueFrame(isRestore){
  const entries=Memory.alloc(240),v=Memory.alloc(24),argv=Memory.alloc(16);
  for(let i=0;i<15;i++){entries.add(i*16).writeU64(i);entries.add(i*16+8).writeU64(0);}
  v.writePointer(entries);v.add(8).writePointer(entries.add(240));v.add(16).writePointer(entries.add(240));argv.writePointer(ptr(0));argv.add(8).writePointer(v);
- pending={input:v,entries,argv,copies:new Set(),sequence:++sequence,restore:isRestore,at:now,
+ pending={input:v,entries,argv,copies:new Set(),sequence:++sequence,restore:isRestore,at:now,leaseDeadline:deadline,phase:'queued',stalled:false,
   inputAt:isRestore?null:pacing.lastInputAt,colors,tiles};
  lastQueued=now;pacing.queued(now,isRestore);activate(target.composer,meta,0,argv);
  if(pending&&pending.copies.size===0)throw Error('Qt vector copy not observed; refusing further notifications');
@@ -241,27 +254,52 @@ Interceptor.attach(exe.base.add(0x5c8550),{onEnter(a){
   const bundle=a[0],image=a[1],t=ownerOf(bundle);if(!t)return;
   if(target&&!t.composer.equals(target.composer))return;
   if(!target&&!selectTarget(t,image))return;
-  if(!armed||Date.now()>=deadline||errors)return;
   const frame=activeFrames.get(Process.getCurrentThreadId());
-  if(frame&&frame.restore)return;
+  if(errors)return;
+  if(frame){if(frame.restore)return;}
+  else if(!armed||Date.now()>=deadline||stalled)return;
   const key=bundle.readU64().toNumber();if(key<0||key>=15)return;
   paintTile(image,key,frame);
  }catch(e){fail(e);}
 }});
 function lease(ms){if(!Number.isInteger(ms)||ms<500||ms>10000)throw Error('lease_ms must be500..10000');const now=Date.now();pacing.input(dirty,now);deadline=now+ms;armed=true;dirty=true;restore=false;}
-function stop(){armed=false;dirty=false;restore=target!==null&&!errors;colors=null;tiles=null;return {stopped:true,restorationPending:restore};}
+function stop(){
+ armed=false;dirty=false;restore=target!==null&&!errors;colors=null;tiles=null;
+ // Cancellation belongs to this notification, not to the replaceable global
+ // lease. A new input may arm the NEXT image, never revive the stopped one.
+ if(pending&&pending.phase==='queued'){pending.restore=true;pending.colors=null;pending.tiles=null;}
+ return {stopped:true,restorationPending:restore};
+}
+function stallQueuedFrame(frame,now){
+ // Qt owns a copy of this notification. Keep its identity and backing memory;
+ // never enqueue a replacement while it might still arrive. Discard the image,
+ // and let that SAME notification restore the native page when Qt resumes.
+ if(frame.phase!=='queued'||frame.stalled)return;
+ frame.stalled=true;stalled=true;queuedStalls++;
+ if(!frame.restore)abandonedFrames++;
+ armed=false;dirty=false;restore=false;colors=null;tiles=null;frame.colors=null;frame.tiles=null;
+ emit('queue-stalled',{sequence:frame.sequence,pendingAgeMs:Math.max(0,now-frame.at),phase:frame.phase});
+}
 rpc.exports={
  layout,
- status(){return {ready:!!target,armed,restorationPending:restore,errors,compositions,paints,paintedKeys:[...paintedKeys],lastFrameCoverage,lastFault,queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
+ status(){return {ready:!!target&&!errors&&!stalled&&!(pending&&pending.renderOverdue),armed,restorationPending:restore||stalled,errors,compositions,paints,paintedKeys:[...paintedKeys],lastFrameCoverage,lastFault,queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,pendingPhase:pending?pending.phase:null,pendingEntered:!!pending&&pending.phase==='rendering',pendingAgeMs:pending?Math.max(0,Date.now()-pending.at):null,stalled,queuedStalls,queueRecoveries,abandonedFrames,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
  configure(options){return pacing.configure(options);},
- setcolors(value,ms){if(!Array.isArray(value)||value.length!==15||value.some(c=>!Array.isArray(c)||c.length!==3||c.some(v=>!Number.isInteger(v)||v<0||v>255)))throw Error('Expected15 RGB triplets');if(errors)throw Error('Native bridge faulted');colors=value.map(c=>c.slice());tiles=null;lease(ms);return {accepted:true};},
- setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('Expected311040 BGRA bytes');if(errors)throw Error('Native bridge faulted');const bytes=new Uint8Array(data);for(let i=3;i<bytes.length;i+=4)if(bytes[i]!==255)throw Error('Only opaque BGRA accepted');tiles=Array.from({length:15},(_,i)=>data.slice(i*20736,(i+1)*20736));colors=null;lease(ms);return {accepted:true};},
+ setcolors(value,ms){if(!Array.isArray(value)||value.length!==15||value.some(c=>!Array.isArray(c)||c.length!==3||c.some(v=>!Number.isInteger(v)||v<0||v>255)))throw Error('Expected15 RGB triplets');if(errors)throw Error('Native bridge faulted');if(stalled)return {accepted:false,reason:'native-queue-stalled'};colors=value.map(c=>c.slice());tiles=null;lease(ms);return {accepted:true};},
+ setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('Expected311040 BGRA bytes');if(errors)throw Error('Native bridge faulted');if(stalled)return {accepted:false,reason:'native-queue-stalled'};const bytes=new Uint8Array(data);for(let i=3;i<bytes.length;i+=4)if(bytes[i]!==255)throw Error('Only opaque BGRA accepted');tiles=Array.from({length:15},(_,i)=>data.slice(i*20736,(i+1)*20736));colors=null;lease(ms);return {accepted:true};},
  stop
 };
 setInterval(()=>{
  if(errors)return;
  try{
-  if(pending&&Date.now()-pending.at>3000)throw Error('Native queued frame timeout; bridge stopped');
+  const now=Date.now();
+  if(pending&&pending.phase==='rendering'){
+   // Do not mutate a render in progress. Report it, then fail after the native
+   // call returns; a genuine slow/hung renderer is NOT a recovered queue stall.
+   if(now-pending.renderAt>3000&&!pending.renderOverdue){pending.renderOverdue=true;emit('render-overdue',{sequence:pending.sequence,renderAgeMs:now-pending.renderAt});}
+   return;
+  }
+  if(pending&&now-pending.at>3000)stallQueuedFrame(pending,now);
+  if(stalled)return;
   if(armed&&Date.now()>=deadline){stop();emit('lease-expired');}
   if(restore){if(queueFrame(true))restore=false;}
   else if(dirty&&armed){if(queueFrame(false))dirty=false;}

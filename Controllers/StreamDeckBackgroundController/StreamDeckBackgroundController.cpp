@@ -237,7 +237,10 @@ nlohmann::json AggregateCompositorStatus(const nlohmann::json& value)
         const auto item=source.find(key);
         if(item!=source.end() && (item->is_number() || item->is_boolean() || item->is_null())) destination[key]=*item;
     };
-    for(const char* key:{"ready","armed","restorationPending","errors","compositions","paints","queued","acknowledged","restores","rejectedCandidates","pending","uptimeMs"}) copy_scalar(value,result,key);
+    for(const char* key:{"ready","armed","restorationPending","errors","compositions","paints","queued","acknowledged","restores","rejectedCandidates","pending","uptimeMs",
+                        "stalled","queuedStalls","queueRecoveries","pendingAgeMs","pendingEntered"}) copy_scalar(value,result,key);
+    const auto phase=value.find("pendingPhase");
+    if(phase!=value.end() && phase->is_string() && (*phase=="queued" || *phase=="rendering")) result["pendingPhase"]=*phase;
     if(value.contains("lastFrameCoverage") && value["lastFrameCoverage"].is_object())
         for(const char* key:{"sequence","restore","rendered","injected","empty","actions"}) copy_scalar(value["lastFrameCoverage"],result["lastFrameCoverage"],key);
     if(value.contains("pacing") && value["pacing"].is_object())

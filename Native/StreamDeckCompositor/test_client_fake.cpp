@@ -5,18 +5,20 @@
 #include <algorithm>
 #include <cstring>
 namespace {
-int opens=0,closes=0,live=0,frames=0,failure=0,remaining=0,health=0;
+int opens=0,closes=0,live=0,frames=0,accepted=0,failure=0,remaining=0,health=0;
+bool stalled=false;
 unsigned pid=10;
 void Copy(const char* text,char* out,unsigned cap)
 { if(out&&cap){auto n=std::min<std::size_t>(std::strlen(text),cap-1);std::memcpy(out,text,n);out[n]=0;} }
 }
 extern "C" __declspec(dllexport) void fixture_reset()
-{ opens=closes=live=frames=failure=remaining=health=0;pid=10; }
+{ opens=closes=live=frames=accepted=failure=remaining=health=0;pid=10;stalled=false; }
 extern "C" __declspec(dllexport) void fixture_failure(int type,int count,int status)
 { failure=type;remaining=count;health=status; }
 extern "C" __declspec(dllexport) int fixture_count(int which)
-{ return which==0?opens:which==1?closes:which==2?live:frames; }
+{ return which==0?opens:which==1?closes:which==2?live:which==4?accepted:frames; }
 extern "C" __declspec(dllexport) void fixture_pid(unsigned value){pid=value;}
+extern "C" __declspec(dllexport) void fixture_stalled(int value){stalled=value!=0;}
 uint32_t room_sd_abi(){return ROOM_SD_ABI;}
 uint32_t room_sd_find_process(){return pid;}
 int room_sd_open(uint32_t,const char*,uint32_t,void** out,char*,uint32_t)
@@ -29,7 +31,8 @@ int room_sd_request(void*,uint32_t op,const uint8_t*,uint32_t,char* out,uint32_t
     {
         if(health==1){Copy("Native compositor RPC timed out or detached",error,error_cap);return ROOM_SD_RPC;}
         Copy(health==2?"{\"errors\":1,\"ready\":true}":health==3?"{\"ready\":true}":health==4?"broken-json":
-             "{\"errors\":0,\"ready\":true}",out,cap);return ROOM_SD_OK;
+             stalled?"{\"errors\":0,\"ready\":false,\"stalled\":true,\"pending\":42}":
+             "{\"errors\":0,\"ready\":true,\"stalled\":false,\"pending\":null}",out,cap);return ROOM_SD_OK;
     }
     if(op==ROOM_SD_FRAME)
     {
@@ -43,7 +46,8 @@ int room_sd_request(void*,uint32_t op,const uint8_t*,uint32_t,char* out,uint32_t
                 "Native compositor reported a fault: invalid native image";
             Copy(text,error,error_cap);return ROOM_SD_RPC;
         }
-        Copy("{\"accepted\":true}",out,cap);return ROOM_SD_OK;
+        if(stalled){Copy("{\"accepted\":false,\"reason\":\"native-queue-stalled\"}",out,cap);return ROOM_SD_OK;}
+        ++accepted;Copy("{\"accepted\":true}",out,cap);return ROOM_SD_OK;
     }
     Copy("{}",out,cap);return ROOM_SD_OK;
 }

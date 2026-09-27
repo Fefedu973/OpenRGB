@@ -50,11 +50,11 @@ class FramePacing {
 // END FRAME PACING
 const pacing=new FramePacing();
 const paintedKeys=new Set(),nativeThreads=new Set(),activeFrames=new Map(),factoryCalls=new Map();
-let lastFrameCoverage=null;
+let lastFrameCoverage=null,lastFault=null;
 function emit(event,data={}){send({event,...data});}
 function check(m,rva,hex){const b=Array.from(new Uint8Array(m.base.add(rva).readByteArray(hex.length/2))).map(x=>x.toString(16).padStart(2,'0')).join('');if(b!==hex)throw Error('Unsupported code '+m.name+'+'+rva.toString(16));}
 function describe(p){try{const a=ptr(p),m=Process.findModuleByAddress(a);return m?m.name+'+'+a.sub(m.base):a.toString();}catch(_){return null;}}
-function fail(e){armed=false;dirty=false;restore=false;errors++;emit('native-error',{message:String(e),type:e.type||null,address:e.address?describe(e.address):null,pc:e.context?describe(e.context.pc):null,stack:e.stack||null});}
+function fail(e){armed=false;dirty=false;restore=false;errors++;const fault={message:String(e),type:e.type||null,address:e.address?describe(e.address):null,pc:e.context?describe(e.context.pc):null,stack:e.stack||null,lastFrameCoverage};if(!lastFault)lastFault=fault;emit('native-error',fault);}
 if(Process.arch!=='x64'||exe.size!==0x1aab000)throw Error('Unsupported Stream Deck build');
 check(exe,0x5c8550,'488bc444894018555356574154415541');
 check(exe,0x419a80,'48895c24185556574154415541564157');
@@ -64,6 +64,7 @@ check(exe,0x4164a0,'48895c2410488974241848897c242055');
 check(exe,0x5c52b0,'48895c242055565741564157');
 check(exe,0x5c544e,'0f57c00f11070f114710488d9680000000');
 check(exe,0x5c8a80,'48895c242055565741564157');
+check(exe,0x5c8b95,'488d5f10488bcbff15de527800');
 check(gui,0x43970,'405355564883ec50');
 check(gui,0x3ab50,'40534883ec204883791000');
 const activate=new NativeFunction(core.getExportByName('?activate@QMetaObject@@SAXPEAVQObject@@PEBU1@HPEAPEAX@Z'),'void',['pointer','pointer','int','pointer'],'win64');
@@ -161,6 +162,8 @@ Interceptor.attach(exe.base.add(0x5c8a80),{onEnter(a){
  if(errors||!activeFrames.has(Process.getCurrentThreadId()))return;
  try{
   const t=ownerOf(a[0]);if(!t||!target||!t.composer.equals(target.composer))return;
+  const stack=factoryCalls.get(Process.getCurrentThreadId()),call=stack&&stack[stack.length-1];
+  if(call&&call.composer.equals(t.composer))call.bundle=a[0];
   a[3]=ptr((a[3].toInt32()||a[0].add(0x48).readU32())|1);
  }catch(e){fail(e);}
 }});
@@ -210,6 +213,14 @@ Interceptor.attach(exe.base.add(0x5c544e),{onEnter(){
  // guessed at a mid-function address. This hook only records the branch.
  if(call&&this.context.rsi.equals(call.composer)&&this.context.rdi.equals(call.out))call.blank=true;
 }});
+// A second native empty case keeps a bundle but has no renderable foreground
+// layers (the state calculation returned bit0=0). This branch copies only the
+// bundle's base image, bypassing the pre-overlay compositor altogether. Mark it
+// positively; the factory onLeave still validates and detaches the returned copy.
+Interceptor.attach(exe.base.add(0x5c8b95),{onEnter(){
+ const stack=factoryCalls.get(Process.getCurrentThreadId()),call=stack&&stack[stack.length-1];
+ if(call&&call.bundle&&this.context.rdi.equals(call.bundle))call.blank=true;
+}});
 Interceptor.attach(exe.base.add(0x5c8550),{onEnter(a){
  compositions++;
  try{
@@ -227,7 +238,7 @@ function lease(ms){if(!Number.isInteger(ms)||ms<500||ms>10000)throw Error('lease
 function stop(){armed=false;dirty=false;restore=target!==null&&!errors;colors=null;tiles=null;return {stopped:true,restorationPending:restore};}
 rpc.exports={
  layout,
- status(){return {ready:!!target,armed,restorationPending:restore,errors,compositions,paints,paintedKeys:[...paintedKeys],lastFrameCoverage,queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
+ status(){return {ready:!!target,armed,restorationPending:restore,errors,compositions,paints,paintedKeys:[...paintedKeys],lastFrameCoverage,lastFault,queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
  configure(options){return pacing.configure(options);},
  setcolors(value,ms){if(!Array.isArray(value)||value.length!==15||value.some(c=>!Array.isArray(c)||c.length!==3||c.some(v=>!Number.isInteger(v)||v<0||v>255)))throw Error('Expected15 RGB triplets');if(errors)throw Error('Native bridge faulted');colors=value.map(c=>c.slice());tiles=null;lease(ms);return {accepted:true};},
  setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('Expected311040 BGRA bytes');if(errors)throw Error('Native bridge faulted');const bytes=new Uint8Array(data);for(let i=3;i<bytes.length;i+=4)if(bytes[i]!==255)throw Error('Only opaque BGRA accepted');tiles=Array.from({length:15},(_,i)=>data.slice(i*20736,(i+1)*20736));colors=null;lease(ms);return {accepted:true};},

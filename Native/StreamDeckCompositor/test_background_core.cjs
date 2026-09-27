@@ -76,6 +76,9 @@ function fixture(options={}) {
  functions.set(exe.base.add(0x5c8a80).toString(),(bundle,out,unused,flags)=>{
   assert(flags.toInt32()&1,'tagged action rendering must be synchronous');
   const image=out.add(0x20);image.add(16).writePointer(blank);
+  if(options.inactiveBundles?.includes(bundle.readU64().toNumber())){
+   point(0x5c8b95,{rdi:bundle});return out;
+  }
   if(options.missedAction!==bundle.readU64().toNumber())invoke(exe.base.add(0x5c8550),[bundle,image]);
   // Native icon/title overlay comes AFTER our pre-overlay background hook.
   const p=detach(image);p.writeByteArray(Buffer.from([251,252,253,255]));return out;
@@ -138,6 +141,14 @@ test('page changes re-evaluate empty/action coverage, native restore renders all
 test('untagged native calls retain original handler',()=>{
  const f=fixture();f.naturalEmpty();f.colors();f.untagged();assert.equal(f.originalCalls,1);assert.equal(f.gridCalls,0);assert.equal(f.rpc.status().acknowledged,0);
 });
+test('empty cells retaining inactive bundles use the positive no-layer branch',()=>{
+ const f=fixture({actions:Array.from({length:15},(_,i)=>i),inactiveBundles:[8,9,10,11,12,13,14]});
+ f.naturalEmpty();f.colors();f.tick();f.drain();const s=f.rpc.status();
+ assert.equal(s.errors,0);assert.equal(s.acknowledged,1);assert.equal(s.lastFrameCoverage.injected,15);assert.equal(s.lastFrameCoverage.empty,7);
+ for(let i=8;i<15;i++)assert.deepEqual([...f.output[i].subarray(0,4)],[25,50,100,255]);
+ f.rpc.stop();f.tick();f.drain();assert.equal(f.rpc.status().restores,1);
+ for(let i=8;i<15;i++)assert.deepEqual(f.output[i],f.blank);
+});
 for(const [label,options] of [['missing cell',{skip:14}],['missing action callback',{missedAction:0}],['null image',{badImage:1}],['invalid stride',{badStride:1}]])
  test(label+' cannot acknowledge a complete frame',()=>{
   const f=fixture(options);f.naturalEmpty();f.colors();f.tick();f.drain();assert(f.rpc.status().errors>0);assert.equal(f.rpc.status().acknowledged,0);
@@ -151,5 +162,5 @@ test('stop while queued and lease expiry render only native restore',()=>{
   assert.equal(f.rpc.status().paints,0);assert.equal(f.rpc.status().restores,1);assert.deepEqual(f.output[0],f.blank);}
 });
 test('exact new native entry/branch guards reject before any interceptor',()=>{
- for(const rva of [0x4164a0,0x5c52b0,0x5c544e])assert.throws(()=>fixture({badGuard:rva}),/Unsupported code/);
+ for(const rva of [0x4164a0,0x5c52b0,0x5c544e,0x5c8b95])assert.throws(()=>fixture({badGuard:rva}),/Unsupported code/);
 });

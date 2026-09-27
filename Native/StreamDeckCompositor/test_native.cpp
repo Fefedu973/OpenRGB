@@ -51,6 +51,7 @@ let armed=false,deadline=0,frames=0;
 rpc.exports={configure(o){return o;},layout(){return {width:480,height:272};},
 status(){return {ready:true,armed:armed&&Date.now()<deadline,pending:null,restorationPending:false,errors:0,frames};},
 setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('frame');let b=new Uint8Array(data);if(b[0]!==173||b[b.length-1]!==255)throw Error('bytes');frames++;armed=true;deadline=Date.now()+ms;return {accepted:true,bytes:b.length,blue:b[0]};},
+fault(){send({event:'native-error',message:'synthetic coverage failure',stack:'fixture:1'});return {};},
 stall(){return new Promise(()=>{});},stop(){armed=false;return {stopped:true,restorationPending:false};}};
 )JS";
         std::cerr<<"test: attach synthetic pid "<<child.process.dwProcessId<<std::endl;
@@ -69,6 +70,9 @@ stall(){return new Promise(()=>{});},stop(){armed=false;return {stopped:true,res
         Reject([&]{engine.Call("stall",room_sd::Json::array(),nullptr,0,100);});
         Check(room_sd::Clock::now()-timeout_start<std::chrono::seconds(1),"Bounded RPC timeout");
         std::string detail;Check(engine.Restore(detail),"Synthetic restoration acknowledged");
+        Reject([&]{engine.Call("fault");});
+        Check(engine.Call("status")["frames"]==20,"Read-only status unavailable after fault");
+        Reject([&]{engine.Call("setframe",room_sd::Json::array({100}),frame.data(),frame.size());});
         const auto close_start=room_sd::Clock::now();engine.Close();
         const auto closed=std::chrono::duration_cast<std::chrono::milliseconds>(room_sd::Clock::now()-close_start).count();
         Check(closed<7000,"Bounded close");

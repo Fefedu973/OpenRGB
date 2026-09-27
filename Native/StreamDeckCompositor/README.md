@@ -6,7 +6,7 @@ Ce module optionnel Windows x64 remplace le serveur Python/HTTP par **Frida Core
 
 Le test physique **antérieur au correctif des cases vides**, sur une page peuplée, a produit 126 images 800 × 600 sur huit secondes : 126 notifications acquittées, 1890 peintures couvrant les quinze touches, zéro erreur, environ 16 images/s réelles pour un plafond de 20. La latence d'acquittement avait un p95 de 7 ms. La restauration normale a été acquittée et le détachement terminé. L'utilisateur a également confirmé visuellement le fond animé natif et les quinze icônes correctes. Ces mesures ne validaient pas les cases sans action : leur défaut a été signalé ensuite sur une autre page.
 
-### Cases sans action : correction en attente de validation physique
+### Cases sans action : validation native sur la page Lights
 
 Le slot d'animation natif ignorait les coordonnées absentes de sa table d'actions,
 même si notre notification demandait les quinze indices. Le correctif utilise,
@@ -14,9 +14,23 @@ pour cette seule notification Qt marquée, le rendu natif de la grille complète
 Ses flags sélectionnent la sortie du périphérique sans reconstruire les couches
 ni créer d'action. Les notifications Elgato ordinaires conservent leur fonction
 d'origine. Les icônes restent composées après le fond pour les touches peuplées.
-Pour une case vide, la branche native qui copie l'image vide est observée sous
-le verrou du compositeur ; seule cette copie est détachée avec `QImage::bits()`
-puis peinte. Ni l'image vide partagée, ni le profil ne sont modifiés.
+Deux cas vides sont distingués positivement dans les branches natives : aucun
+bundle, ou bundle conservé sans couche de premier plan active. La branche qui
+copie le fond de base est observée sous le verrou du compositeur ; seule cette
+copie est détachée avec `QImage::bits()` puis peinte. Ni l'image vide partagée,
+ni le profil ne sont modifiés. Une simple absence du callback de composition
+ne suffit jamais pour autoriser l'écrasement d'une image contenant des icônes.
+
+Le premier correctif omettait le second cas : après 79 images complètes, la
+garde a refusé une image avec quinze retours natifs mais seulement huit fonds
+injectés. Le diagnostic a identifié sept bundles sans couche active. Après
+correction de cette branche, le test réel de vingt secondes a soumis et acquitté
+**315 images**, avec une dernière couverture de **8 touches actives et 7 cases
+vides**, quinze fonds injectés et zéro erreur. Le p95 d'acquittement était de
+2 ms ; la cadence moyenne de soumission/acquittement était de 15,75 images/s
+pour un plafond de 20. La restauration native et le détachement ont réussi.
+Le processus Elgato est resté ouvert. La validation optique par l'utilisateur
+et une navigation complète entre pages restent distinctes de ces compteurs.
 
 `lastFrameCoverage` rapporte les nombres `rendered`, `injected`, `empty` et
 `actions` **pour la dernière image**, avec son numéro et son état `restore`.
@@ -25,14 +39,15 @@ exige quinze images natives et aucune injection. Le compteur cumulé `paintedKey
 reste informatif mais ne prouve pas la couverture de la page actuelle. L'ACK
 confirme le retour du rendu/soumission natif, pas une mesure optique des LCD.
 
-Les tests isolés exécutent le vrai script avec une mémoire Qt/Frida simulée :
+Les douze tests isolés exécutent le vrai script avec une mémoire Qt/Frida simulée :
 page mixte, page entièrement vide, quinze tuiles distinctes, icônes conservées,
 copie vide inchangée, changement de page, restauration, notification non marquée,
 target expiré, image/stride invalides, couverture manquante, arrêt et expiration
-pendant l'attente Qt. Le build ne lance aucun test matériel. Restent à vérifier
-sur l'application épinglée : la page Lights avec des cases vides, le passage à
-une autre page et le retour exact au rendu Elgato après arrêt. Aucun résultat
-physique du nouveau chemin n'est encore revendiqué.
+pendant l'attente Qt. Ils incluent explicitement les bundles vides conservés.
+Le build ne lance aucun test matériel ; le test ci-dessus a été lancé séparément
+avec autorisation. Le harness accepte les deux derniers arguments facultatifs
+`ANIMATION_SECONDS DISCOVERY_SECONDS`, bornés à 30 et 300 secondes ; son message
+`ATTACHED` confirme le chargement réel avant d'attendre un rendu naturel.
 
 La découverte automatique a pris 1492 ms pendant ce test, sans changement de page. Elle attend néanmoins la **première composition naturelle** d'une touche, exactement comme le pont précédent. Une horloge à rafraîchissement par minute peut donc retarder le démarrage jusqu'à sa prochaine mise à jour. Une page entièrement immobile peut rester en attente ; aucun scan de tas, pointeur d'une ancienne session ou appel sur un objet non validé ne contourne cette limite. Le premier essai de huit secondes, trop court, était resté en attente sans écrire de pixels. Le contrôleur conserve son attachement et réessaie l'état après une seconde, sans boucle d'injections.
 
@@ -64,6 +79,14 @@ processus Elgato. Cela corrige une course réelle, sans prétendre que tous les
 avertissements observés en session provenaient de cette seule cause. Les
 réponses de forme inattendue indiquent maintenant l'opération et le type JSON,
 sans enregistrer leur contenu.
+
+Une faute conserve désormais son premier message, sa stack et la couverture
+de l'image concernée. Seul le RPC de lecture `status` reste disponible après
+cette faute ; les nouvelles écritures et tentatives de reprise restent refusées.
+Le client conserve ce diagnostic avant de fermer, ainsi que l'erreur de la
+première fermeture : un second `Close()` ne peut plus faire croire qu'une
+restauration précédemment refusée a réussi. Les tests vérifient aussi le maintien
+de la cause initiale et l'accès au statut après faute dans l'enfant synthétique.
 
 ## Configuration
 

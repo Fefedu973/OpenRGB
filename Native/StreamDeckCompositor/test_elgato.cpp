@@ -8,25 +8,28 @@
 #include <thread>
 int main(int argc,char** argv)
 {
-    if(argc!=4 || std::string(argv[1])!="--authorized-elgato-test") {
-        std::cerr<<"Usage: test_elgato --authorized-elgato-test ABSOLUTE_DLL ABSOLUTE_SHARED_LOCK_DIRECTORY\n";return 2;
+    if((argc!=4 && argc!=6) || std::string(argv[1])!="--authorized-elgato-test") {
+        std::cerr<<"Usage: test_elgato --authorized-elgato-test ABSOLUTE_DLL ABSOLUTE_SHARED_LOCK_DIRECTORY [ANIMATION_SECONDS DISCOVERY_SECONDS]\n";return 2;
     }
     using Clock=std::chrono::steady_clock;using namespace streamdeck_background;
     NativeClient native(argv[2],argv[3],20);nlohmann::json evidence;
     try {
-        const auto deadline=Clock::now()+std::chrono::seconds(75);nlohmann::json before;
-        std::cerr<<"WAITING: guarded natural composition, at most 75 seconds; no pixel writes while waiting\n";
+        const unsigned animation=argc==6?std::stoul(argv[4]):8, discovery=argc==6?std::stoul(argv[5]):75;
+        if(animation<1 || animation>30 || discovery<1 || discovery>300)throw std::runtime_error("Invalid bounded test duration");
+        const auto deadline=Clock::now()+std::chrono::seconds(discovery);nlohmann::json before;bool attached=false;
+        std::cerr<<"WAITING: guarded natural composition, at most "<<discovery<<" seconds; no pixel writes while waiting\n";
         do {
             before=native.Request("/health",{});
+            if(!attached){attached=true;std::cerr<<"ATTACHED: guarded script listening; natural render may now select the page\n";}
             evidence["waitingStatus"]=before;
             if(before.value("ready",false))break;
             std::this_thread::sleep_for(std::chrono::milliseconds(100));
         }while(Clock::now()<deadline);
-        if(!before.value("ready",false))throw std::runtime_error("No guarded 5x3 compositor discovered within 75 seconds");
+        if(!before.value("ready",false))throw std::runtime_error("No guarded 5x3 compositor discovered within deadline");
         const auto layout=ParseLayout(native.Request("/layout",{}));
-        evidence["before"]=before;std::cerr<<"ANIMATION START: native in-process 800x600 gradient, 8 seconds, icons preserved by compositor\n";
+        evidence["before"]=before;evidence["animationSeconds"]=animation;std::cerr<<"ANIMATION START: native in-process 800x600 gradient, "<<animation<<" seconds, icons preserved by compositor\n";
         const auto start=Clock::now();unsigned frames=0;
-        while(Clock::now()-start<std::chrono::seconds(8)) {
+        while(Clock::now()-start<std::chrono::seconds(animation)) {
             const auto tick=Clock::now();
             auto bytes=std::make_shared<std::vector<unsigned char>>(800*600*4);
             const double phase=std::chrono::duration<double>(tick-start).count();
@@ -51,5 +54,5 @@ int main(int argc,char** argv)
         native.Request("/stop",{});const auto error=native.Close();
         evidence["restored"]=error.empty();evidence["closeError"]=error;evidence["ok"]=error.empty();
         std::cout<<evidence.dump()<<std::endl;return error.empty()?0:1;
-    }catch(const std::exception& e){const auto restore=native.Close();evidence["ok"]=false;evidence["error"]=e.what();evidence["closeError"]=restore;std::cout<<evidence.dump()<<std::endl;return 1;}
+    }catch(const std::exception& e){evidence["faultStatus"]=native.LastDiagnostics();const auto restore=native.Close();evidence["ok"]=false;evidence["error"]=e.what();evidence["closeError"]=restore;evidence["restored"]=restore.empty();std::cout<<evidence.dump()<<std::endl;return 1;}
 }

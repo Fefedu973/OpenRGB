@@ -13,7 +13,15 @@ foreach ($file in @($VcVars,(Join-Path $sdk 'frida-core.h'),(Join-Path $sdk 'fri
 [IO.Directory]::CreateDirectory($build) | Out-Null
 $js = [IO.File]::ReadAllText((Join-Path $PSScriptRoot 'background-core.js'))
 if ($js.Contains(')ROOM_SCRIPT"')) { throw 'Unexpected raw-string delimiter in script' }
-[IO.File]::WriteAllText((Join-Path $build 'GuardedScript.inc'), "static const char ROOM_GUARDED_SCRIPT[] = R`"ROOM_SCRIPT($js)ROOM_SCRIPT`";", [Text.UTF8Encoding]::new($false))
+# MSVC limits the size of one string token. Adjacent raw literals preserve the
+# exact script bytes without a runtime loader or compiler-dependent truncation.
+$embedded = [Text.StringBuilder]::new('static const char ROOM_GUARDED_SCRIPT[] = ')
+for ($offset = 0; $offset -lt $js.Length; $offset += 4000) {
+    $chunk = $js.Substring($offset, [Math]::Min(4000, $js.Length - $offset))
+    [void]$embedded.Append("R`"ROOM_SCRIPT($chunk)ROOM_SCRIPT`"`n")
+}
+[void]$embedded.Append(';')
+[IO.File]::WriteAllText((Join-Path $build 'GuardedScript.inc'), $embedded.ToString(), [Text.UTF8Encoding]::new($false))
 $commands = @(
     '@echo off', 'setlocal', "call `"$VcVars`" >nul", 'if errorlevel 1 exit /b 2',
     "cd /d `"$build`"",

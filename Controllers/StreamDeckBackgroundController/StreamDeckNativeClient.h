@@ -14,6 +14,7 @@ public:
     ~NativeClient();
     nlohmann::json Request(const char* path,const std::string& body);
     std::string Close(); // Empty iff restoration and detach completed successfully.
+    nlohmann::json LastDiagnostics() const; // Cached status; never reconnects or writes.
 private:
     struct Impl;std::unique_ptr<Impl> impl;
 };

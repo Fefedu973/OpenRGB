@@ -15,6 +15,8 @@ namespace streamdeck_background {
 struct NativeClient::Impl {
     std::string library,lock_directory;unsigned fps;void* handle=nullptr;
     std::uint32_t failed_pid=0,active_pid=0;
+    nlohmann::json diagnostics;
+    std::string close_error;
 #ifdef _WIN32
     HMODULE module=nullptr;
     decltype(&room_sd_abi) abi=nullptr;
@@ -42,7 +44,7 @@ struct NativeClient::Impl {
         Load();if(handle)return;const auto pid=find_process();
         if(!pid)throw std::runtime_error("Waiting for the pinned Elgato application");
         if(pid==failed_pid)throw std::runtime_error("Native compositor faulted; waiting for a new Elgato process");
-        std::array<char,1024> error{};
+        std::array<char,16384> error{};
         const auto code=open(pid,lock_directory.c_str(),fps,&handle,error.data(),static_cast<uint32_t>(error.size()));
         if(code!=ROOM_SD_OK) {
             // A busy observer can be released normally. Unsupported guards and
@@ -50,13 +52,14 @@ struct NativeClient::Impl {
             if(code==ROOM_SD_GUARD || code==ROOM_SD_ATTACH || code==ROOM_SD_RPC)failed_pid=pid;
             throw std::runtime_error(error[0]?error.data():"Native compositor could not open");
         }
-        active_pid=pid;
+        active_pid=pid;close_error.clear();diagnostics=nullptr;
     }
     std::string Close()
     {
-        if(!handle)return {};
-        std::array<char,1024> error{};const auto code=close(handle,error.data(),static_cast<uint32_t>(error.size()));handle=nullptr;active_pid=0;
-        return code==ROOM_SD_OK?std::string():std::string(error[0]?error.data():"Native restoration incomplete");
+        if(!handle)return close_error;
+        std::array<char,16384> error{};const auto code=close(handle,error.data(),static_cast<uint32_t>(error.size()));handle=nullptr;active_pid=0;
+        close_error=code==ROOM_SD_OK?std::string():std::string(error[0]?error.data():"Native restoration incomplete");
+        return close_error;
     }
 #endif
 };
@@ -76,6 +79,7 @@ std::string NativeClient::Close()
     return {};
 #endif
 }
+nlohmann::json NativeClient::LastDiagnostics() const {return impl->diagnostics;}
 nlohmann::json NativeClient::Request(const char* path,const std::string& body)
 {
 #ifdef _WIN32
@@ -86,11 +90,15 @@ nlohmann::json NativeClient::Request(const char* path,const std::string& body)
     else if(route=="/frame")operation=ROOM_SD_FRAME;
     else if(route=="/stop")operation=ROOM_SD_STOP;
     else throw std::runtime_error("Unknown native compositor operation");
-    std::array<char,16384> result{};std::array<char,1024> error{};
+    std::array<char,16384> result{};std::array<char,16384> error{};
     const auto code=impl->request(impl->handle,operation,reinterpret_cast<const uint8_t*>(body.data()),
                                  static_cast<uint32_t>(body.size()),result.data(),static_cast<uint32_t>(result.size()),
                                  error.data(),static_cast<uint32_t>(error.size()));
     if(code!=ROOM_SD_OK) {
+        std::array<char,16384> status{},status_error{};
+        if(impl->request(impl->handle,ROOM_SD_STATUS,nullptr,0,status.data(),static_cast<uint32_t>(status.size()),
+                         status_error.data(),static_cast<uint32_t>(status_error.size()))==ROOM_SD_OK)
+            impl->diagnostics=nlohmann::json::parse(status.data(),nullptr,false);
         impl->failed_pid=impl->active_pid;impl->Close();
         throw std::runtime_error(error[0]?error.data():"Native compositor request failed");
     }
@@ -98,8 +106,11 @@ nlohmann::json NativeClient::Request(const char* path,const std::string& body)
     // layout is null until the guarded native composer is discovered.
     if(value.is_null() && operation==ROOM_SD_LAYOUT)throw std::runtime_error("Waiting for native Stream Deck layout");
     if(!value.is_object())throw std::runtime_error("Invalid native compositor response (operation="+route+", type="+value.type_name()+")");
-    if(operation==ROOM_SD_STATUS && value.value("errors",0)!=0)
-        throw std::runtime_error("Native compositor reported a fault");
+    if(operation==ROOM_SD_STATUS) {
+        impl->diagnostics=value;
+        if(value.value("errors",0)!=0)
+            throw std::runtime_error("Native compositor reported a fault: "+value.value("lastFault",nlohmann::json()).dump());
+    }
     return value;
 #else
     (void)path;(void)body;throw std::runtime_error("The optional native Elgato compositor requires Windows");

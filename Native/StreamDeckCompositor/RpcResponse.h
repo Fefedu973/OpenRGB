@@ -33,7 +33,7 @@ public:
             if(!envelope.is_object())return;
             const auto type=envelope.find("type");
             if(type==envelope.end() || !type->is_string())return;
-            if(*type=="error") { Fault("Guarded compositor script failed");return; }
+            if(*type=="error") { Fault(DescribeFault("Guarded compositor script failed",envelope));return; }
             if(*type!="send" || !envelope.contains("payload"))return;
             const auto& payload=envelope["payload"];
             if(payload.is_array() && payload.size()>=4 && payload[0]=="frida:rpc" && payload[1].is_number_unsigned())
@@ -48,15 +48,22 @@ public:
             {
                 const auto event=payload.find("event");
                 if(event!=payload.end() && event->is_string() && *event=="native-error")
-                    Fault("Native compositor reported a fault");
+                    Fault(DescribeFault("Native compositor reported a fault",payload));
             }
         } catch(...) { Fault("Native compositor RPC envelope parsing failed"); }
     }
 private:
-    void Fault(const char* text)
+    static std::string DescribeFault(const char* prefix,const nlohmann::json& value)
+    {
+        nlohmann::json details=nlohmann::json::object();
+        for(const char* key:{"message","description","type","address","pc","stack","lastFrameCoverage"})
+            if(value.contains(key))details[key]=value[key];
+        return std::string(prefix)+": "+details.dump().substr(0,8000);
+    }
+    void Fault(const std::string& text)
     {
         std::lock_guard<std::mutex> lock(mutex);
-        result.fault=text;
+        if(result.fault.empty())result.fault=text;
     }
     mutable std::mutex mutex;
     std::uint64_t waiting_id=0;

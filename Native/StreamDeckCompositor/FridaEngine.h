@@ -102,8 +102,9 @@ public:
     {
         CheckThread();Pump();
         if(!script || !loaded || detached)throw std::runtime_error("Compositor session is disconnected");
+        const bool diagnostics=std::string(method)=="status";
         const auto fault=response.Read().fault;
-        if(!fault.empty())throw std::runtime_error(fault);
+        if(!diagnostics && !fault.empty())throw std::runtime_error(fault);
         const auto waiting_id=++next_id;response.Begin(waiting_id);
         const auto command=Json::array({"frida:rpc",waiting_id,"call",method,arguments}).dump();
         GBytes* bytes=data?g_bytes_new(data,size):nullptr;
@@ -112,7 +113,7 @@ public:
         do {
             Pump();
             const auto result=response.Read();
-            if(!result.fault.empty())throw std::runtime_error(result.fault);
+            if(!diagnostics && !result.fault.empty())throw std::runtime_error(result.fault);
             if(result.completed) {
                 if(!result.error.empty())throw std::runtime_error(result.error);
                 return result.value;

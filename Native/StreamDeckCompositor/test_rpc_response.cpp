@@ -42,8 +42,13 @@ int main()
             while(finished.load(std::memory_order_acquire)!=i)std::this_thread::yield();
         }
         producer.join();Check(valid,"Ready observed before complete payload publication");
-        box.Message("{\"type\":\"send\",\"payload\":{\"event\":\"native-error\"}}");
+        box.Message("{\"type\":\"send\",\"payload\":{\"event\":\"native-error\",\"message\":\"Incomplete grid\",\"stack\":\"fixture:12\",\"lastFrameCoverage\":{\"injected\":8},\"unrelated\":\"omit this field\"}}");
         Check(!box.Read().fault.empty(),"Native fault missing");
+        const auto first_fault=box.Read().fault;
+        Check(first_fault.find("Incomplete grid")!=std::string::npos && first_fault.find("fixture:12")!=std::string::npos &&
+              first_fault.find("injected")!=std::string::npos && first_fault.find("omit this field")==std::string::npos,"Fault diagnostics missing or unfiltered");
+        box.Message("{\"type\":\"error\",\"description\":\"later cleanup failure\"}");
+        Check(box.Read().fault==first_fault,"Secondary failure replaced original cause");
         box.Begin(9999);Check(!box.Read().fault.empty(),"Persistent native fault cleared by retry");
         std::cout<<"PASS RPC envelope validation, duplicate/stale filtering, null layout, errors, 2000 concurrent full-payload replies, persistent fault\n";
         return 0;

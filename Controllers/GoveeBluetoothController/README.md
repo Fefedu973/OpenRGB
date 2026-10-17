@@ -326,5 +326,10 @@ restoration remain unchanged. The log label is now `explicit_white`.
 Offline regressions cover OFF-to-white, thirty seconds of unchanged white
 without repeated mode writes, 50% brightness, brightness-only updates, rejected
 secondary-zero replies without forced ON/rewrite loops, and black-exit policy.
-The physical comparison validates the packet; the rebuilt production binary
-still requires the coordinated installation and profile-transition check.
+The rebuilt production binary was then installed and exercised through two
+Full Noir to Full Blanc profile transitions. Each white phase remained stable
+for twelve seconds, with 120 SDK samples across both cycles and explicit-white
+readback in the worker log. The user confirmed stable white after both starts.
+The thirty-second offline test is an observation interval, not a hold timer:
+the next chromatic frame is sent at the ordinary hardware cadence, including
+the tested white-to-color transition 100 ms later.

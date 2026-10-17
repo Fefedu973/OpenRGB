@@ -502,6 +502,16 @@ int main()
                 {"candidates",invalid},{"wakeups",invalid}}}}).empty(),"Invalid bootstrap counter escaped into SDK");
         Check(AggregateCompositorStatus({{"bootstrap","not-an-object"}}).empty(),"Invalid bootstrap object accepted");
         Check(AggregateCompositorStatus(json::array()).empty(),"Old/invalid status must remain compatible");
+        const auto recovery=AggregateCompositorStatus({{"ready",false},{"lastKnownReady",true},{"cached",true},{"stale",true},
+            {"sampledSteadyMs",123},{"ageMs",8200},{"retryAfterMs",10000},{"recoveryAttempts",4},
+            {"transportState","recovering"},{"transportError",std::string(1000,'e')},{"stack","excluded"}});
+        Check(recovery["sampledSteadyMs"]==123 && recovery["ageMs"]==8200 && recovery["ready"]==false && recovery["lastKnownReady"]==true,
+              "Cached diagnostics must preserve their real sample time and distinguish old ready");
+        Check(recovery["transportState"]=="recovering" && recovery["retryAfterMs"]==10000 && recovery["cached"]==true && recovery["stale"]==true,
+              "Recovery metadata missing");
+        Check(!recovery.contains("stack") && recovery["transportError"].get<std::string>().size()==512,"Transport error must be bounded without native stack");
+        Check(AggregateCompositorStatus({{"sampledSteadyMs",nullptr},{"ageMs",nullptr}})["sampledSteadyMs"].is_null(),"First missing status must not invent a timestamp");
+        Check(!AggregateCompositorStatus({{"transportState","secret-value"}}).contains("transportState"),"Transport state must use the closed enum");
         std::cout << "PASS bounded aggregate compositor metadata without images\n";
         TestOptionsAndImage();std::cout << "PASS configuration, native layout, BGRA and spatial gradients\n";
         TestCoalescingAndLease();std::cout << "PASS real mock HTTP, coalescing, pacing, lease and stop\n";

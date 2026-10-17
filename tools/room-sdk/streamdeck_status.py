@@ -47,11 +47,50 @@ def runtime_of(body):
                     # This controller publishes aggregates only. Do not include
                     # names, serial numbers, locations, pixels or other settings.
                     return {k: runtime[k] for k in
-                            ('state', 'input', 'submitted', 'accepted', 'failures', 'compositor')
+                            ('state', 'input', 'error', 'submitted', 'accepted', 'failures', 'compositor')
                             if k in runtime}
             except (ValueError, AttributeError):
                 pass
         start += 1
+
+
+class DiagnosticFreshness:
+    """Age repeated SDK snapshots locally; never label an old RPC sample new.
+
+    ageMs is the age when the worker published the metadata, not a live SDK
+    clock. observedAgeMs adds elapsed observation time for that same sample.
+    No cross-process assumption about the C++ steady clock epoch is required.
+    """
+    def __init__(self):
+        self.key = None
+        self.first_seen = None
+        self.initial_age = None
+
+    def annotate(self, runtime, now):
+        if not isinstance(runtime, dict) or not isinstance(runtime.get('compositor'), dict):
+            return runtime
+        result = dict(runtime)
+        compositor = dict(runtime['compositor'])
+        result['compositor'] = compositor
+        sample = compositor.get('sampledSteadyMs')
+        age = compositor.get('ageMs')
+        if not isinstance(sample, (int, float)) or isinstance(sample, bool):
+            compositor['observedAgeMs'] = None
+            compositor['stale'] = True
+            return result
+        key = (sample, compositor.get('uptimeMs'))
+        repeated = key == self.key and self.first_seen is not None
+        valid_age = isinstance(age, (int, float)) and not isinstance(age, bool) and age >= 0
+        if not repeated:
+            self.key, self.first_seen = key, now
+            self.initial_age = age if valid_age else None
+        observed = None if self.initial_age is None else max(0, self.initial_age + (now-self.first_seen)*1000)
+        if observed is not None and valid_age:
+            observed = max(observed, age)
+        compositor['observedAgeMs'] = None if observed is None else round(observed)
+        compositor['cached'] = bool(compositor.get('cached')) or repeated
+        compositor['stale'] = bool(compositor.get('stale')) or (observed is not None and observed > 5000) or compositor.get('transportState') in ('recovering', 'faulted', 'closed', 'disconnected')
+        return result
 
 
 def self_test():
@@ -67,6 +106,19 @@ def self_test():
     assert runtime_of(body[:-len(configuration)-4]+b'not-json\0') is None
     corrupted = body[:-len(configuration)-4]+struct.pack('<I',2)+configuration
     assert runtime_of(corrupted) is None
+    freshness = DiagnosticFreshness()
+    runtime = {'error': 'bounded transport error', 'compositor': {
+        'sampledSteadyMs': 123, 'ageMs': 0, 'uptimeMs': 900,
+        'ready': True, 'cached': False, 'transportState': 'active'}}
+    assert freshness.annotate(runtime, 1)['compositor']['observedAgeMs'] == 0
+    older = freshness.annotate(runtime, 8)['compositor']
+    assert older['observedAgeMs'] == 7000 and older['cached'] and older['stale']
+    assert runtime['compositor']['ageMs'] == 0 and 'observedAgeMs' not in runtime['compositor']
+    recovering = {'compositor': dict(runtime['compositor'], transportState='recovering', ageMs=8000)}
+    assert freshness.annotate(recovering, 9)['compositor']['observedAgeMs'] == 8000
+    new = {'compositor': dict(runtime['compositor'], sampledSteadyMs=124, uptimeMs=1900)}
+    assert freshness.annotate(new, 10)['compositor']['observedAgeMs'] == 0
+    assert freshness.annotate({'compositor': {'sampledSteadyMs': None}}, 11)['compositor']['stale']
     print('Offline descriptor parser: PASS (no socket opened)')
 
 
@@ -96,6 +148,7 @@ def main():
                 break
         if first is None:
             raise RuntimeError('Stream Deck background controller not found')
+        freshness = DiagnosticFreshness()
         for sample in range(args.samples):
             if sample:
                 time.sleep(args.interval)
@@ -103,7 +156,7 @@ def main():
                 if name_of(first) != TARGET:
                     raise RuntimeError('Controller changed during observation; rerun discovery')
             print(json.dumps({'utc': datetime.now(timezone.utc).isoformat(),
-                              'sdk_device': selected, 'runtime': runtime_of(first)},ensure_ascii=False),flush=True)
+                              'sdk_device': selected, 'runtime': freshness.annotate(runtime_of(first), time.monotonic())},ensure_ascii=False),flush=True)
     finally:
         client.close()
 

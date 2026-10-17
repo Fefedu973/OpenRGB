@@ -10,6 +10,7 @@ const meta=exe.base.add(0x1578290),start=Date.now();
 let target=null,armed=false,deadline=0,dirty=false,restore=false,colors=null,tiles=null;
 let pending=null,sequence=0,lastQueued=0,errors=0,compositions=0,paints=0,acknowledged=0,restores=0,rejectedCandidates=0;
 let stalled=false,queuedStalls=0,queueRecoveries=0,abandonedFrames=0;
+let leaseRevision=0;
 const bootstrap={phase:'searching',attempts:0,threadQueries:0,candidates:0,wakeups:0,detail:null};
 let bootstrapCandidate=null,bootstrapAwaiting=false,bootstrapProbeRequested=false,bootstrapCancelled=false,bootstrapLastSearch=-1000;
 // BEGIN FRAME PACING
@@ -52,6 +53,24 @@ class FramePacing {
 }
 // END FRAME PACING
 const pacing=new FramePacing();
+// BEGIN FRAME LEASE
+// Pure acceptance gate, also exercised through the real Frida child fixture.
+// expiresAt and now use GetTickCount64 in both processes, never wall time.
+class FrameLease {
+ constructor(){this.lastSequence=0;}
+ check(ms,expiresAt,sequence,now){
+  if(!Number.isInteger(ms)||ms<500||ms>10000)throw Error('lease_ms must be500..10000');
+  if(!Number.isSafeInteger(expiresAt)||expiresAt<=0||!Number.isSafeInteger(now)||now<0||expiresAt>now+ms)
+   throw Error('Invalid monotonic frame deadline');
+  if(!Number.isSafeInteger(sequence)||sequence<=0)throw Error('Invalid frame sequence');
+  if(sequence<=this.lastSequence)return 'native-frame-stale';
+  // Even an expired newer request supersedes older requests still in flight.
+  this.lastSequence=sequence;
+  return expiresAt<=now?'native-frame-expired':null;
+ }
+}
+// END FRAME LEASE
+const frameLease=new FrameLease();
 const paintedKeys=new Set(),nativeThreads=new Set(),activeFrames=new Map(),factoryCalls=new Map();
 let lastFrameCoverage=null,lastFault=null;
 function emit(event,data={}){send({event,...data});}
@@ -88,6 +107,8 @@ const renderGrid=new NativeFunction(exe.base.add(0x4164a0),'void',['pointer','ui
 const objectThread=new NativeFunction(core.getExportByName('?thread@QObject@@QEBAPEAVQThread@@XZ'),'pointer',['pointer'],'win64');
 const currentQtThread=new NativeFunction(core.getExportByName('?currentThread@QThread@@SAPEAV1@XZ'),'pointer',[],'win64');
 const kernel=Process.getModuleByName('kernel32.dll'),ntdll=Process.getModuleByName('ntdll.dll'),user=Process.getModuleByName('user32.dll');
+const getTickCount64=new NativeFunction(kernel.getExportByName('GetTickCount64'),'uint64',[],'win64');
+function monotonicMs(){return getTickCount64().toNumber();}
 const openThread=new NativeFunction(kernel.getExportByName('OpenThread'),'pointer',['uint','int','uint'],'win64');
 const closeHandle=new NativeFunction(kernel.getExportByName('CloseHandle'),'int',['pointer'],'win64');
 const queryThread=new NativeFunction(ntdll.getExportByName('NtQueryInformationThread'),'int',['pointer','uint','pointer','uint','pointer'],'win64');
@@ -225,7 +246,8 @@ Interceptor.replace(exe.base.add(0x419a80),new NativeCallback((owner,vector)=>{
   if(enteredAt-frame.at>3000)stallQueuedFrame(frame,enteredAt);
   // A queued image must not repaint after stop/lease expiry. Render the native
   // page instead, through the same complete route used by explicit restoration.
-  if(frame.stalled||!armed||enteredAt>=deadline||enteredAt>=frame.leaseDeadline){frame.restore=true;restore=false;}
+  const leaseNow=monotonicMs();
+  if(frame.stalled||!armed||leaseNow>=deadline||leaseNow>=frame.leaseDeadline){frame.restore=true;restore=false;}
   // From this point the render owns an immutable choice of pixels/restoration.
   // A timer, stop RPC or lease expiry must not change half of a 15-key frame.
   frame.phase='rendering';frame.renderAt=enteredAt;
@@ -345,13 +367,14 @@ Interceptor.attach(exe.base.add(0x5c8550),{onEnter(a){
   const frame=activeFrames.get(Process.getCurrentThreadId());
   if(errors)return;
   if(frame){if(frame.restore)return;}
-  else if(!armed||Date.now()>=deadline||stalled)return;
+  else if(!armed||monotonicMs()>=deadline||stalled)return;
   const key=bundle.readU64().toNumber();if(key<0||key>=15)return;
   paintTile(image,key,frame);
  }catch(e){fail(e);}
 }});
-function lease(ms){if(!Number.isInteger(ms)||ms<500||ms>10000)throw Error('lease_ms must be500..10000');const now=Date.now();pacing.input(dirty,now);deadline=now+ms;armed=true;dirty=true;restore=false;}
+function lease(ms,expiresAt){if(!Number.isInteger(ms)||ms<500||ms>10000)throw Error('lease_ms must be500..10000');const now=Date.now();pacing.input(dirty,now);deadline=expiresAt===undefined?monotonicMs()+ms:expiresAt;armed=true;dirty=true;restore=false;}
 function stop(){
+ leaseRevision++;
  bootstrapCancelled=true;bootstrapCandidate=null;
  // No render/image has been sent for this candidate yet, so there is nothing
  // to restore. Do not enqueue behind a stop in the owner-validation/timer gap.
@@ -378,7 +401,18 @@ rpc.exports={
  status(){return {ready:!!target&&!bootstrapAwaiting&&!errors&&!stalled&&!(pending&&pending.renderOverdue),bootstrap:{...bootstrap},armed,restorationPending:restore||stalled,errors,compositions,paints,paintedKeys:[...paintedKeys],lastFrameCoverage,lastFault,queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,pendingPhase:pending?pending.phase:null,pendingEntered:!!pending&&pending.phase==='rendering',pendingAgeMs:pending?Math.max(0,Date.now()-pending.at):null,stalled,queuedStalls,queueRecoveries,abandonedFrames,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
  configure(options){return pacing.configure(options);},
  setcolors(value,ms){if(!Array.isArray(value)||value.length!==15||value.some(c=>!Array.isArray(c)||c.length!==3||c.some(v=>!Number.isInteger(v)||v<0||v>255)))throw Error('Expected15 RGB triplets');if(errors)throw Error('Native bridge faulted');if(bootstrapAwaiting)return {accepted:false,reason:'native-bootstrap-pending'};if(stalled)return {accepted:false,reason:'native-queue-stalled'};colors=value.map(c=>c.slice());tiles=null;lease(ms);return {accepted:true};},
- setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('Expected311040 BGRA bytes');if(errors)throw Error('Native bridge faulted');if(bootstrapAwaiting)return {accepted:false,reason:'native-bootstrap-pending'};if(stalled)return {accepted:false,reason:'native-queue-stalled'};const bytes=new Uint8Array(data);for(let i=3;i<bytes.length;i+=4)if(bytes[i]!==255)throw Error('Only opaque BGRA accepted');tiles=Array.from({length:15},(_,i)=>data.slice(i*20736,(i+1)*20736));colors=null;lease(ms);return {accepted:true};},
+ setframe(ms,expiresAt,sequence,data){
+  if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('Expected311040 BGRA bytes');
+  const revision=leaseRevision,now=monotonicMs();
+  if(revision!==leaseRevision)return {accepted:false,reason:'native-frame-cancelled'};
+  if(errors)throw Error('Native bridge faulted');
+  const reason=frameLease.check(ms,expiresAt,sequence,now);
+  if(reason)return {accepted:false,reason};
+  if(bootstrapAwaiting)return {accepted:false,reason:'native-bootstrap-pending'};
+  if(stalled)return {accepted:false,reason:'native-queue-stalled'};
+  const bytes=new Uint8Array(data);for(let i=3;i<bytes.length;i+=4)if(bytes[i]!==255)throw Error('Only opaque BGRA accepted');
+  tiles=Array.from({length:15},(_,i)=>data.slice(i*20736,(i+1)*20736));colors=null;lease(ms,expiresAt);return {accepted:true};
+ },
  stop
 };
 setInterval(()=>{
@@ -394,7 +428,7 @@ setInterval(()=>{
   }
   if(pending&&now-pending.at>3000)stallQueuedFrame(pending,now);
   if(stalled)return;
-  if(armed&&Date.now()>=deadline){stop();emit('lease-expired');}
+  if(armed&&monotonicMs()>=deadline){stop();emit('lease-expired');}
   if(bootstrapProbeRequested){
    // The owner was checked on its Qt thread. Recheck its lifetime and affinity
    // after yielding before using the same sender/queued path as normal frames.

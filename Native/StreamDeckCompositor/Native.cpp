@@ -8,7 +8,7 @@
 #include <memory>
 
 namespace {
-struct Handle {room_sd::ObserverLock lock;room_sd::Engine engine;};
+struct Handle {room_sd::ObserverLock lock;room_sd::Engine engine;std::uint64_t frame_sequence=0;};
 void Copy(const std::string& value,char* buffer,std::uint32_t capacity)
 { if(buffer && capacity){const auto n=std::min<std::size_t>(value.size(),capacity-1);memcpy(buffer,value.data(),n);buffer[n]=0;} }
 }
@@ -38,17 +38,21 @@ int room_sd_open(uint32_t pid,const char* directory,uint32_t fps,void** output,c
 int room_sd_request(void* pointer,uint32_t operation,const uint8_t* data,uint32_t size,
                     char* result,uint32_t result_capacity,char* error,uint32_t error_capacity)
 {
+    // Shared OS monotonic clock: time spent validating/posting/dispatching this
+    // request must consume its lease, not start a new lease in the target.
+    const auto received_tick=GetTickCount64();
     Copy("",error,error_capacity);
     if(!pointer || !result || result_capacity<2)return ROOM_SD_INVALID;
     try {
-        auto& engine=static_cast<Handle*>(pointer)->engine;room_sd::Json value;
+        auto& handle=*static_cast<Handle*>(pointer);auto& engine=handle.engine;
+        engine.CheckThread();room_sd::Json value;
         switch(operation) {
         case ROOM_SD_STATUS:value=engine.Call("status");break;
         case ROOM_SD_LAYOUT:value=engine.Call("layout");break;
         case ROOM_SD_FRAME:
             if(!data || size!=311040)throw std::runtime_error("Expected 311040 opaque BGRA tile bytes");
             for(std::size_t i=3;i<size;i+=4)if(data[i]!=255)throw std::runtime_error("Only opaque BGRA accepted");
-            value=engine.Call("setframe",room_sd::Json::array({2000}),data,size);break;
+            value=engine.Call("setframe",room_sd::Json::array({2000,received_tick+2000,++handle.frame_sequence}),data,size);break;
         case ROOM_SD_STOP:value=engine.Call("stop");break;
         default:return ROOM_SD_INVALID;
         }

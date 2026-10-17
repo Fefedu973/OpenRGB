@@ -249,6 +249,56 @@ L'utilisateur a confirmé le retour automatique du fond sans changement de page.
 Cette validation concerne les versions exactes protégées par les guards ci-dessus.
 
 
+### Plusieurs délais RPC consécutifs — 17 octobre 2026
+
+Après environ 67 minutes de fonctionnement, un appel `setframe` a dépassé
+1500 ms, mais sa sonde de santé a répondu. Vingt secondes plus tard, `status`
+et la demande de restauration ont également dépassé leurs délais. Le client
+a fermé la session puis refusé définitivement le même PID Elgato. Les images
+continuaient d'arriver dans OpenRGB. Le dernier statut valide ne signalait
+aucune erreur native et avait acquitté 39 468 notifications ; son absence de
+notification en attente ne permet pas de connaître l'état après cet instant.
+La cause du ralentissement initial reste inconnue. Windows a refusé la lecture
+non invasive des stacks du processus Elgato.
+
+La politique de timeout isolé décrite plus haut est remplacée par une mise en
+attente du **même handle**, avec son verrou propriétaire conservé. Un timeout
+de réponse ne déclenche plus de détachement ni de nouvel attachement. Seules
+des lectures de santé sont autorisées, espacées de 1, 2, 4, 8 puis 10 secondes
+au maximum. Chaque appel conserve son délai de 1500 ms. Une réponse récente
+`errors=0, ready=true` autorise la reprise ; le contrôleur sélectionne alors
+une image encore valide, sans rejouer celle dont l'envoi a échoué. Tant que le
+dispatcher ne répond pas, le transport reste en récupération et n'accumule pas
+d'images. Les erreurs natives réelles, réponses invalides et détachements
+restent traités comme des fautes. La fermeture normale reste bornée.
+
+Une commande déjà transmise reçoit désormais son échéance d'origine et son
+numéro de séquence. `GetTickCount64`, commun aux deux processus, mesure le bail
+de deux secondes dès l'entrée dans la DLL. Un RPC exécuté en retard ne peut
+plus recommencer ce bail ; une commande périmée ou plus ancienne est refusée.
+Une notification Qt conservée possède également sa propre échéance : une
+nouvelle image ne prolonge pas celle déjà en file.
+
+Le diagnostic distingue `transportState`, `cached`, `ageMs`,
+`recoveryAttempts`, `retryAfterMs` et l'erreur de transport. `sampledSteadyMs`
+désigne la vraie dernière réponse de santé, même lors d'une nouvelle publication
+du cache ; `ready` devient faux pendant la récupération. L'âge affiché est
+calculé à la publication par le worker, pas par un appel Frida depuis le SDK.
+Le lecteur `tools/room-sdk/streamdeck_status.py` expose aussi l'erreur du worker.
+
+Ce changement permet de récupérer un dispatcher qui se remet à répondre ; il
+ne prétend pas débloquer de force un appel natif définitivement coincé. Les
+tests de transport synthétique et la validation après installation sont
+distincts d'une reproduction du ralentissement réel après une heure.
+
+Validation du candidat : 38 groupes du vrai script, 69 assertions du vrai
+client contre une DLL synthétique, 2 000 réponses RPC concurrentes et la suite
+du contrôleur passent. Dans un enfant Frida isolé, un appel natif `Sleep` lancé
+par le timer bloque effectivement les réponses `status` et `setframe`. À son
+retour, l'image périmée est rejetée et une image fraîche est acceptée sur la
+même session. Ce test reproduit le mécanisme de récupération, sans attribuer
+à cet appel synthétique la cause de l'incident Elgato.
+
 ## Compilation facultative
 
 Installer MSVC 2022 Build Tools et extraire le devkit officiel **Frida Core 17.18.0 Windows x86_64** avec 7-Zip. Il n'est pas nécessaire d'exécuter son archive auto-extractible.
@@ -304,7 +354,7 @@ Les images de l'interface générique `RGBControllerImageInterface`, le canal Fr
 
 ## Gardes et arrêt
 
-Avant tout attachement : chemin exact `C:\Program Files\Elgato\StreamDeck\StreamDeck.exe`, processus unique, SHA256 exact des trois binaires, puis verrou propriétaire. Le JS vérifie encore chemin, architecture, taille d'image et signatures de fonctions ; les objets doivent avoir les vtables, grille 5 × 3, géométrie et QImage temporaire attendues. Aucun mode de désactivation des gardes n'est exposé. Un échec de garde/attach/RPC suspend les nouveaux attachements pour ce PID ; un nouveau processus Elgato permet une nouvelle tentative. Une occupation du verrou reste réessayable après libération.
+Avant tout attachement : chemin exact `C:\Program Files\Elgato\StreamDeck\StreamDeck.exe`, processus unique, SHA256 exact des trois binaires, puis verrou propriétaire. Le JS vérifie encore chemin, architecture, taille d'image et signatures de fonctions ; les objets doivent avoir les vtables, grille 5 × 3, géométrie et QImage temporaire attendues. Aucun mode de désactivation des gardes n'est exposé. Un échec de garde/attachement ou une faute native suspend les nouveaux attachements pour ce PID ; un nouveau processus Elgato permet une nouvelle tentative. Un simple timeout de réponse RPC conserve la session et utilise la récupération décrite plus haut. Une occupation du verrou reste réessayable après libération.
 
 L'export `setframe` ne reçoit que 311040 bytes BGRA opaques avec un bail de deux secondes. Le code validé n'a qu'une notification en cours et une dernière image. L'arrêt demande le fond normal et attend son acquittement pendant au plus trois secondes. Les appels Frida de chargement/détachement utilisent une annulation à deux secondes chacun ; ce mécanisme borne les opérations normales et ne prétend pas terminer de force un processus tiers bloqué. Les erreurs de restauration ou de détachement sont remontées. Aucun arrêt brutal de Frida/Elgato n'est utilisé.
 

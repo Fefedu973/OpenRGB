@@ -238,7 +238,15 @@ nlohmann::json AggregateCompositorStatus(const nlohmann::json& value)
         if(item!=source.end() && (item->is_number() || item->is_boolean() || item->is_null())) destination[key]=*item;
     };
     for(const char* key:{"ready","armed","restorationPending","errors","compositions","paints","queued","acknowledged","restores","rejectedCandidates","pending","uptimeMs",
-                        "stalled","queuedStalls","queueRecoveries","pendingAgeMs","pendingEntered"}) copy_scalar(value,result,key);
+                        "stalled","queuedStalls","queueRecoveries","pendingAgeMs","pendingEntered",
+                        "sampledSteadyMs","ageMs","cached","stale","lastKnownReady","recoveryAttempts","retryAfterMs"}) copy_scalar(value,result,key);
+    const auto transport=value.find("transportState");
+    if(transport!=value.end() && transport->is_string())
+        for(const char* allowed:{"disconnected","active","recovering","faulted","closed"})
+            if(*transport==allowed) result["transportState"]=*transport;
+    const auto transport_error=value.find("transportError");
+    if(transport_error!=value.end() && transport_error->is_string())
+        result["transportError"]=transport_error->get<std::string>().substr(0,512);
     const auto phase=value.find("pendingPhase");
     if(phase!=value.end() && phase->is_string() && (*phase=="queued" || *phase=="rendering")) result["pendingPhase"]=*phase;
     if(value.contains("bootstrap") && value["bootstrap"].is_object())
@@ -285,10 +293,19 @@ void Controller::UpdateCompositorStatus(const nlohmann::json& value)
 {
     auto aggregate=AggregateCompositorStatus(value);
     if(aggregate.empty()) return;
-    aggregate["sampledSteadyMs"]=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+    // NativeClient owns the real sample time, including null before first
+    // response. Republishing its cache after a failure must never rejuvenate it.
+    if(!aggregate.contains("sampledSteadyMs"))
+        aggregate["sampledSteadyMs"]=std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
     Status snapshot;
     {
         std::lock_guard<std::mutex> lock(mutex);
+        const auto transport=aggregate.value("transportState",std::string());
+        if(transport=="recovering" || transport=="faulted")
+        {
+            status.state=transport;
+            status.error=aggregate.value("transportError",status.error);
+        }
         status.compositor=std::move(aggregate);
         snapshot=status;
     }

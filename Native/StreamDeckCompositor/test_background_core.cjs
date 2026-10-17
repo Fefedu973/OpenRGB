@@ -9,7 +9,7 @@ const source=fs.readFileSync(require('node:path').join(__dirname,'background-cor
 
 function fixture(options={}) {
  const memory=[],hooks=new Map(),replacements=new Map(),functions=new Map(),events=[],queue=[];
- let address=0x200000000,now=1000,timer,originalCalls=0,gridCalls=0,output=[],descriptors=[],uploaded=[],tid=77,opened=0,closed=0,wakeups=[],listenerDepth=0;
+ let address=0x200000000,now=1000,wallOffset=0,inputSequence=0,timer,originalCalls=0,gridCalls=0,output=[],descriptors=[],uploaded=[],tid=77,opened=0,closed=0,wakeups=[],listenerDepth=0;
  class Pointer {
   constructor(n){this.n=n instanceof Pointer?n.n:Number(n);}
   add(n){return ptr(this.n+Number(n));}sub(n){return ptr(this.n-Number(n instanceof Pointer?n.n:n));}
@@ -82,6 +82,7 @@ function fixture(options={}) {
  if(options.badBootstrapTile)composer.add(0x80+16).writePointer(ptr(0));
  functions.set(kernel.getExportByName('OpenThread').toString(),(access,inherit,id)=>{assert.equal(access,0x40);assert.equal(inherit,0);if(options.denyThread)return ptr(0);opened++;return ptr(id);});
  functions.set(kernel.getExportByName('CloseHandle').toString(),()=>{closed++;return 1;});
+ functions.set(kernel.getExportByName('GetTickCount64').toString(),()=>{options.duringClockRead?.(sandbox.rpc.exports);return {toNumber:()=>now};});
  functions.set(ntdll.getExportByName('NtQueryInformationThread').toString(),(handle,kind,out,size,length)=>{
   assert.equal(kind,0);assert.equal(size,48);if(options.badQuery)return -1;
   out.add(8).writePointer(threadRecords.find(x=>x.id===handle.n).teb);length.writeU32(48);return 0;
@@ -141,13 +142,15 @@ function fixture(options={}) {
  const sandbox={Process:{mainModule:exe,arch:'x64',id:1,getModuleByName:n=>Object.values(modules).find(m=>m.name===n),getCurrentThreadId:()=>tid,enumerateThreads:()=>options.tooManyThreads?Array.from({length:513},(_,i)=>({id:i})):threadRecords.map(x=>({id:x.id}))},
   Memory:{alloc},ptr,NativeFunction:function(p){return (...args)=>invoke(p,args,{},true);},NativeCallback:function(f){return f;},
   Interceptor:{attach(p,h){const key=p.toString();hooks.set(key,[...(hooks.get(key)||[]),h]);},replace(p,f){replacements.set(p.toString(),f);}},
-  rpc:{exports:api},send:e=>events.push(e),setInterval:f=>{timer=f;},Date:{now:()=>now},ArrayBuffer,Uint8Array};
+  rpc:{exports:api},send:e=>events.push(e),setInterval:f=>{timer=f;},Date:{now:()=>now+wallOffset},ArrayBuffer,Uint8Array};
  vm.runInNewContext(source,sandbox,{filename:'background-core.js'});
  function naturalEmpty(){const old=actions;actions=new Set();const out=alloc(128);invoke(exe.base.add(0x5c52b0),[composer,out,ptr(0),ptr(0)]);actions=old;}
  return {rpc:sandbox.rpc.exports,events,naturalEmpty,queue,
   dispatch(threadId=77){const old=tid;tid=threadId;try{invoke(core.base.add(0x25e7f0));}finally{tid=old;}},
   changeAffinity(){affinity=ptr(0);},get handles(){return {opened,closed};},get wakeups(){return wakeups;},
   tick(ms=60){now+=ms;timer();},advance(ms){now+=ms;},drain(){assert(queue.length);queue.shift()();},
+  frame(data,{ms=2000,expiresAt=now+ms,sequence=++inputSequence}={}){return sandbox.rpc.exports.setframe(ms,expiresAt,sequence,data);},
+  get now(){return now;},wallJump(ms){wallOffset+=ms;},
   colors(rgb=[100,50,25]){return sandbox.rpc.exports.setcolors(Array.from({length:15},()=>rgb),2000);},
   untagged(){invoke(exe.base.add(0x419a80),[owner,alloc(24)]);},
   setActions(keys){actions=new Set(keys);},expireTarget(){owner.writePointer(ptr(0));},
@@ -171,7 +174,7 @@ test('mixed grid paints 15 current cells, leaves icons and native shared blank i
 test('empty page is naturally discoverable and full image uses each distinct tile',()=>{
  const f=fixture({actions:[]});assert.equal(f.rpc.status().ready,false);f.naturalEmpty();assert.equal(f.rpc.status().ready,true);
  const bytes=new Uint8Array(311040);for(let i=0;i<bytes.length;i+=4){bytes[i]=Math.floor(i/20736);bytes[i+3]=255;}
- f.rpc.setframe(2000,bytes.buffer);f.tick();f.drain();assert.equal(f.rpc.status().lastFrameCoverage.empty,15);
+ f.frame(bytes.buffer);f.tick();f.drain();assert.equal(f.rpc.status().lastFrameCoverage.empty,15);
  for(let i=0;i<15;i++){
   assert.deepEqual([...f.uploaded[i].subarray(0,4)],[i,0,0,255]);
   assert.deepEqual(f.descriptors[i],{cache:0,destination:i});
@@ -224,7 +227,7 @@ test('queued delay is nonfatal and keeps exactly one Qt notification until nativ
  assert.equal(s.queuedStalls,1);assert.equal(s.abandonedFrames,1);assert.equal(s.restorationPending,true);
  assert.equal(f.colors().accepted,false);
  const bytes=new Uint8Array(311040);for(let i=3;i<bytes.length;i+=4)bytes[i]=255;
- assert.equal(f.rpc.setframe(2000,bytes.buffer).accepted,false);
+ assert.equal(f.frame(bytes.buffer).accepted,false);
  for(let i=0;i<5;i++)f.tick(5000);
  assert.equal(f.queue.length,1);assert.equal(f.queue[0],queued);assert.equal(f.rpc.status().queuedStalls,1);
  // A page may have changed while Qt was busy. Restore its CURRENT icons/page.
@@ -389,4 +392,47 @@ test('stop during deferred activate retains the pending Qt notification until it
 test('bootstrap does not report ready after an incomplete native grid',()=>{
  const f=fixture({bootstrap:true,skip:14});f.tick();f.dispatch();f.tick();f.drain();const s=f.rpc.status();
  assert.equal(s.ready,false);assert.equal(s.errors,1);assert.equal(s.bootstrap.phase,'queued-native-probe');assert.equal(s.paints,0);
+});
+
+function opaqueFrame(blue=7){const bytes=new Uint8Array(311040);for(let i=0;i<bytes.length;i+=4){bytes[i]=blue;bytes[i+3]=255;}return bytes.buffer;}
+test('expired frame never arms or paints and an older sequence cannot supersede it',()=>{
+ const f=fixture();f.naturalEmpty();const bytes=opaqueFrame();
+ assert.deepEqual({...f.frame(bytes,{expiresAt:f.now,sequence:3})},{accepted:false,reason:'native-frame-expired'});
+ assert.deepEqual({...f.frame(bytes,{sequence:2})},{accepted:false,reason:'native-frame-stale'});
+ f.tick();assert.equal(f.queue.length,0);assert.equal(f.rpc.status().armed,false);assert.equal(f.rpc.status().paints,0);
+ assert.equal(f.frame(bytes,{sequence:4}).accepted,true);f.tick();f.drain();assert.equal(f.rpc.status().paints,15);
+});
+test('a valid delayed frame keeps only its original remaining lease and ignores wall-clock changes',()=>{
+ for(const wallDelta of [-3600000,3600000]){
+  const f=fixture();f.naturalEmpty();const expiresAt=f.now+200;
+  assert.equal(f.frame(opaqueFrame(),{expiresAt}).accepted,true);f.tick();f.drain();
+  f.wallJump(wallDelta);f.tick(139);assert.equal(f.rpc.status().armed,true);
+  f.tick(1);assert.equal(f.rpc.status().armed,false,'lease expires at original monotonic deadline');
+ }
+});
+test('an expired or duplicate frame does not overwrite or extend the newest accepted image',()=>{
+ const f=fixture({actions:[]});f.naturalEmpty();const expiresAt=f.now+500;
+ assert.equal(f.frame(opaqueFrame(11),{expiresAt,sequence:2}).accepted,true);
+ assert.equal(f.frame(opaqueFrame(99),{sequence:1}).reason,'native-frame-stale');
+ assert.equal(f.frame(opaqueFrame(99),{sequence:2}).reason,'native-frame-stale');
+ assert.equal(f.frame(opaqueFrame(99),{expiresAt:f.now,sequence:3}).reason,'native-frame-expired');
+ f.tick();f.drain();assert.equal(f.output[0][0],11);f.tick(440);assert.equal(f.rpc.status().armed,false);
+});
+test('queued native image also obeys the original host lease after a later lease arrives',()=>{
+ const f=fixture({actions:[]});f.naturalEmpty();f.frame(opaqueFrame(11),{expiresAt:f.now+200,sequence:1});f.tick();
+ f.advance(200);f.frame(opaqueFrame(22),{sequence:2});f.drain();
+ assert.equal(f.rpc.status().lastFrameCoverage.restore,true);assert.deepEqual(f.output[0],f.blank);
+ f.tick();f.drain();assert.equal(f.output[0][0],22);
+});
+test('monotonic frame envelope validates bounds and does not clear the active lease on rejection',()=>{
+ const f=fixture();f.naturalEmpty();const bytes=opaqueFrame();f.frame(bytes,{sequence:1});
+ for(const options of [{ms:499},{ms:10001},{expiresAt:NaN},{expiresAt:Infinity},{expiresAt:1.5},
+  {expiresAt:f.now+2001},{sequence:0},{sequence:-1},{sequence:1.5},{sequence:Number.MAX_SAFE_INTEGER+1}])
+  assert.throws(()=>f.frame(bytes,options));
+ assert.equal(f.rpc.status().armed,true);assert.equal(f.rpc.status().errors,0);
+});
+test('stop during the native monotonic clock read cancels frame acceptance before any image copy',()=>{
+ let cancel=false;const f=fixture({duringClockRead(rpc){if(cancel){cancel=false;rpc.stop();}}});f.naturalEmpty();cancel=true;
+ assert.equal(f.frame(opaqueFrame()).reason,'native-frame-cancelled');assert.equal(f.rpc.status().armed,false);
+ f.tick();f.drain();assert.equal(f.rpc.status().paints,0);assert.equal(f.rpc.status().restores,1);
 });

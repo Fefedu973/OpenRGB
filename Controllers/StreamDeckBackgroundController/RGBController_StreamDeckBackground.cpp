@@ -23,6 +23,7 @@ RGBController_StreamDeckBackground::RGBController_StreamDeckBackground(const str
           // by the transport while publishing; no editable configuration field.
           const auto value=nlohmann::json{{"schema",nlohmann::json::object()},
               {"configuration",{{"runtime",{{"state",status.state},{"input",status.input},
+                  {"error",status.error.substr(0,512)},
                   {"submitted",status.submitted},{"accepted",status.accepted},{"failures",status.failures},
                   {"compositor",status.compositor}}}}}}.dump();
           std::unique_lock<std::shared_mutex> lock(AccessMutex);

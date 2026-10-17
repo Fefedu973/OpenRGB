@@ -299,6 +299,26 @@ retour, l'image périmée est rejetée et une image fraîche est acceptée sur l
 même session. Ce test reproduit le mécanisme de récupération, sans attribuer
 à cet appel synthétique la cause de l'incident Elgato.
 
+Après installation du commit `0e4a9608`, OpenRGB a retrouvé le compositeur du
+processus Elgato resté ouvert, sans changement de page. Les quinze touches,
+dont quatre vides, ont repris leur rendu ; l'utilisateur a confirmé le fond
+revenu et synchronisé. Les 77 fichiers JSON de configuration et les DLL
+Effects/VisualMap ont conservé leurs hashes.
+
+Une nouvelle panne transitoire est ensuite survenue pendant le contrôle réel :
+`setframe` a expiré à 63 389 ms, puis `status` à 65 936 ms. Le client est resté
+en récupération, a effectué deux sondes et a repris sur la même session sans
+redémarrage. Le statut a montré une restauration native complète, puis de
+nouvelles images ; les ACK ont progressé de 621 à 796 sur les dix échantillons
+suivants, avec quinze fonds injectés, zéro erreur native et aucun nouvel échec.
+La reprise de ce cas est donc observée sur le matériel. Cela ne démontre pas
+la cause des ralentissements ni leur disparition.
+
+Binaires installés : core SHA256
+`ED02489444EAA684BA4162F1DD006E9F9D0E91945C256795FD985FEF677D461D` ;
+DLL native SHA256
+`D0C66326E9A09833CCE1FD1024D007CCBBAE98703F5D6EB4F05061B850092966`.
+
 ## Compilation facultative
 
 Installer MSVC 2022 Build Tools et extraire le devkit officiel **Frida Core 17.18.0 Windows x86_64** avec 7-Zip. Il n'est pas nécessaire d'exécuter son archive auto-extractible.

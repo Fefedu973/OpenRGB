@@ -480,6 +480,27 @@ int main()
         const auto invalid_scalars=AggregateCompositorStatus({{"stalled",json::object()},{"queuedStalls",json::array()},
             {"queueRecoveries","secret"},{"pendingAgeMs",json::array()},{"pendingEntered","not-a-scalar-counter"}});
         Check(invalid_scalars.empty(),"Non-scalar stall payload escaped into SDK");
+        const auto boot=AggregateCompositorStatus({{"bootstrap",{{"phase","queued-native-probe"},{"detail",nullptr},
+            {"attempts",3},{"threadQueries",107},{"candidates",1},{"wakeups",1},
+            {"threadId",123},{"owner","0xDEADBEEF"},{"token","excluded"}}}});
+        Check(boot.at("bootstrap").size()==6 && boot["bootstrap"]["phase"]=="queued-native-probe" &&
+              boot["bootstrap"]["detail"].is_null() && boot["bootstrap"]["threadQueries"]==107,
+              "Bootstrap metadata is incomplete or exposes thread identities/pointers");
+        for(const char* phase:{"searching","natural","waiting-owner-thread","queued-native-probe","complete","cancelled","unavailable"})
+            Check(AggregateCompositorStatus({{"bootstrap",{{"phase",phase}}}})["bootstrap"]["phase"]==phase,
+                  "Known bootstrap phase lost");
+        for(const char* detail:{"invalid-tls-index","thread-limit","ambiguous-device","waiting-existing-composer",
+                               "owner-thread-unavailable","owner-wakeup-unavailable","owner-changed","layout-not-ready",
+                               "owner-dispatch-timeout","search-limit"})
+            Check(AggregateCompositorStatus({{"bootstrap",{{"detail",detail}}}})["bootstrap"]["detail"]==detail,
+                  "Known bootstrap diagnostic lost");
+        for(const auto& invalid:std::vector<json>{std::string(10000,'x'),"0xDEADBEEF",123,true,json::array(),json::object()})
+            Check(AggregateCompositorStatus({{"bootstrap",{{"phase",invalid},{"detail",invalid}}}}).empty(),
+                  "Unrestricted bootstrap diagnostic escaped into SDK");
+        for(const auto& invalid:std::vector<json>{-1,1.5,true,nullptr,"123",json::array(),json::object()})
+            Check(AggregateCompositorStatus({{"bootstrap",{{"attempts",invalid},{"threadQueries",invalid},
+                {"candidates",invalid},{"wakeups",invalid}}}}).empty(),"Invalid bootstrap counter escaped into SDK");
+        Check(AggregateCompositorStatus({{"bootstrap","not-an-object"}}).empty(),"Invalid bootstrap object accepted");
         Check(AggregateCompositorStatus(json::array()).empty(),"Old/invalid status must remain compatible");
         std::cout << "PASS bounded aggregate compositor metadata without images\n";
         TestOptionsAndImage();std::cout << "PASS configuration, native layout, BGRA and spatial gradients\n";

@@ -241,6 +241,32 @@ nlohmann::json AggregateCompositorStatus(const nlohmann::json& value)
                         "stalled","queuedStalls","queueRecoveries","pendingAgeMs","pendingEntered"}) copy_scalar(value,result,key);
     const auto phase=value.find("pendingPhase");
     if(phase!=value.end() && phase->is_string() && (*phase=="queued" || *phase=="rendering")) result["pendingPhase"]=*phase;
+    if(value.contains("bootstrap") && value["bootstrap"].is_object())
+    {
+        const auto& source=value["bootstrap"];
+        json bootstrap=json::object();
+        for(const char* key:{"attempts","threadQueries","candidates","wakeups"})
+        {
+            const auto item=source.find(key);
+            if(item!=source.end() && (item->is_number_unsigned() ||
+               (item->is_number_integer() && item->get<int64_t>()>=0))) bootstrap[key]=*item;
+        }
+        const auto bootstrap_phase=source.find("phase");
+        if(bootstrap_phase!=source.end() && bootstrap_phase->is_string())
+            for(const char* allowed:{"searching","natural","waiting-owner-thread","queued-native-probe","complete","cancelled","unavailable"})
+                if(*bootstrap_phase==allowed) bootstrap["phase"]=*bootstrap_phase;
+        const auto detail=source.find("detail");
+        if(detail!=source.end())
+        {
+            if(detail->is_null()) bootstrap["detail"]=nullptr;
+            else if(detail->is_string())
+                for(const char* allowed:{"invalid-tls-index","thread-limit","ambiguous-device","waiting-existing-composer",
+                                        "owner-thread-unavailable","owner-wakeup-unavailable","owner-changed","layout-not-ready",
+                                        "owner-dispatch-timeout","search-limit"})
+                    if(*detail==allowed) bootstrap["detail"]=*detail;
+        }
+        if(!bootstrap.empty()) result["bootstrap"]=std::move(bootstrap);
+    }
     if(value.contains("lastFrameCoverage") && value["lastFrameCoverage"].is_object())
         for(const char* key:{"sequence","restore","rendered","injected","empty","actions"}) copy_scalar(value["lastFrameCoverage"],result["lastFrameCoverage"],key);
     if(value.contains("pacing") && value["pacing"].is_object())

@@ -180,7 +180,57 @@ avec autorisation. Le harness accepte les deux derniers arguments facultatifs
 `ANIMATION_SECONDS DISCOVERY_SECONDS`, bornés à 30 et 300 secondes ; son message
 `ATTACHED` confirme le chargement réel avant d'attendre un rendu naturel.
 
-La découverte automatique a pris 1492 ms pendant ce test, sans changement de page. Elle attend néanmoins la **première composition naturelle** d'une touche, exactement comme le pont précédent. Une horloge à rafraîchissement par minute peut donc retarder le démarrage jusqu'à sa prochaine mise à jour. Une page entièrement immobile peut rester en attente ; aucun scan de tas, pointeur d'une ancienne session ou appel sur un objet non validé ne contourne cette limite. Le premier essai de huit secondes, trop court, était resté en attente sans écrire de pixels. Le contrôleur conserve son attachement et réessaie l'état après une seconde, sans boucle d'injections.
+La version précédente attendait la première composition naturelle : une page
+immobile pouvait rester en attente jusqu'à un changement de page. Le test
+historique ci-dessus avait rencontré cette limite, malgré un démarrage réussi
+en 1492 ms dans un autre essai.
+
+### Démarrage d'une page statique — candidat du 17 octobre 2026
+
+Le bootstrap cherche le compositeur **déjà vivant** parmi les QThread du même
+processus. Il lit les TEB/TLS via les API Windows de requête de thread ; il ne
+parcourt pas le tas et ne réemploie aucune adresse d'une ancienne session.
+Chaque handle ouvert est fermé. Le code demande au plus 512 threads par
+recherche, une recherche par seconde et 60 recherches. Un candidat non traité
+expire après trois secondes. En cas d'absence ou d'ambiguïté, la découverte
+naturelle reste disponible sans erreur fatale.
+
+Les trois fichiers Elgato restent verrouillés par leur SHA256. Quatre guards Qt
+supplémentaires vérifient la provenance exacte des offsets :
+
+| Code Qt6Core | Relation vérifiée |
+| --- | --- |
+| `0x26cab0` | TLS index à `0x9cb570`, TEB `+0x58`, bloc TLS `+0x68` vers QThreadData |
+| `0x1a54e0` | `QThread::currentThread()` lit le QThread à QThreadData `+0x50` |
+| `0x100e80` | `QObject::thread()` lit l'affinité du propriétaire |
+| `0x25e7f0` | Entrée de `QEventDispatcherWin32::processEvents()` |
+
+Le candidat doit vérifier les deux vtables natives, l'offset du compositeur
+physique `owner+0x4f0`, la grille 5×3 et l'image native existante de 72×72.
+Un message Windows `WM_NULL` réveille le thread propriétaire, sans action de
+bouton, changement de page ou profil. À l'entrée de sa boucle Qt, le script
+revérifie le propriétaire et son affinité avant d'émettre **la même notification
+Qt marquée** que les images normales. Celle-ci effectue une première
+restauration native complète, sans injection de pixels. `ready` reste faux et
+les nouvelles images sont refusées jusqu'à son ACK des quinze cases. Le chemin
+de composition des icônes demeure inchangé. Un arrêt annule tout candidat qui
+n'a pas encore été envoyé ; une notification déjà envoyée reste suivie jusqu'à
+son retour comme les autres restaurations.
+
+Le statut `bootstrap` expose uniquement `phase`, `detail` et quatre compteurs
+(`attempts`, `threadQueries`, `candidates`, `wakeups`), sans adresse mémoire.
+Pour valider le démarrage réel sans geste, exiger `phase=complete`, `ready=true`,
+une couverture native de quinze cases et des ACK de nouvelles images. `natural`
+indique que le chemin historique a trouvé la cible avant le bootstrap.
+
+Validation hors matériel : 28 groupes du script de production passent, dont
+page statique sans composition préalable, mauvais thread/candidat/affinité,
+mémoire du candidat libérée, ambiguïté, bornes/retry, arrêt avant dispatch,
+ACK pendant `activate`, grille incomplète et refus des nouveaux guards modifiés.
+Les 17 guards ont été comparés aux octets des PE installés. Ces tests ne prouvent
+pas encore un démarrage physique sur page statique ; le candidat doit recevoir
+cette validation séparée avant d'être annoncé comme vérifié sur l'appareil.
+
 
 ## Compilation facultative
 

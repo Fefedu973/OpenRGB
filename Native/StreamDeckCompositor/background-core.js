@@ -10,6 +10,8 @@ const meta=exe.base.add(0x1578290),start=Date.now();
 let target=null,armed=false,deadline=0,dirty=false,restore=false,colors=null,tiles=null;
 let pending=null,sequence=0,lastQueued=0,errors=0,compositions=0,paints=0,acknowledged=0,restores=0,rejectedCandidates=0;
 let stalled=false,queuedStalls=0,queueRecoveries=0,abandonedFrames=0;
+const bootstrap={phase:'searching',attempts:0,threadQueries:0,candidates:0,wakeups:0,detail:null};
+let bootstrapCandidate=null,bootstrapAwaiting=false,bootstrapCancelled=false,bootstrapLastSearch=-1000;
 // BEGIN FRAME PACING
 class FramePacing {
  constructor(maxFps=20,now=Date.now()){this.maxFps=maxFps;this.nextAt=0;this.reset(now);}
@@ -70,6 +72,12 @@ check(exe,0x5c8b95,'488d5f10488bcbff15de527800');
 // prove the forced action path clears it and the upload task tests it.
 check(exe,0x5c8b51,'4c897dbf488d7710');
 check(exe,0x60ed0a,'4d3966480f8ea0000000');
+// These pinned Qt instructions are the provenance of the read-only TLS walk:
+// currentThread() -> current QThreadData -> QThread*, and QObject::thread().
+check(core,0x26cab0,'8b0dbaea750065488b042558000000ba68000000488b04c8488b0402c3');
+check(core,0x1a54e0,'4883ec28e8c7750c004885c07505e88d740c00488b4050904883c428c3');
+check(core,0x100e80,'488b4108488b4058488b405090c3');
+check(core,0x25e7f0,'48895c2410488974241848897c242055');
 check(gui,0x43970,'405355564883ec50');
 check(gui,0x3ab50,'40534883ec204883791000');
 const activate=new NativeFunction(core.getExportByName('?activate@QMetaObject@@SAXPEAVQObject@@PEBU1@HPEAPEAX@Z'),'void',['pointer','pointer','int','pointer'],'win64');
@@ -77,6 +85,13 @@ const fill=new NativeFunction(gui.getExportByName('?fill@QImage@@QEAAXI@Z'),'voi
 const bits=new NativeFunction(gui.getExportByName('?bits@QImage@@QEAAPEAEXZ'),'pointer',['pointer'],'win64');
 const originalAnimate=new NativeFunction(exe.base.add(0x419a80),'void',['pointer','pointer'],'win64');
 const renderGrid=new NativeFunction(exe.base.add(0x4164a0),'void',['pointer','uint'],'win64');
+const objectThread=new NativeFunction(core.getExportByName('?thread@QObject@@QEBAPEAVQThread@@XZ'),'pointer',['pointer'],'win64');
+const currentQtThread=new NativeFunction(core.getExportByName('?currentThread@QThread@@SAPEAV1@XZ'),'pointer',[],'win64');
+const kernel=Process.getModuleByName('kernel32.dll'),ntdll=Process.getModuleByName('ntdll.dll'),user=Process.getModuleByName('user32.dll');
+const openThread=new NativeFunction(kernel.getExportByName('OpenThread'),'pointer',['uint','int','uint'],'win64');
+const closeHandle=new NativeFunction(kernel.getExportByName('CloseHandle'),'int',['pointer'],'win64');
+const queryThread=new NativeFunction(ntdll.getExportByName('NtQueryInformationThread'),'int',['pointer','uint','pointer','uint','pointer'],'win64');
+const postThreadMessage=new NativeFunction(user.getExportByName('PostThreadMessageW'),'int',['uint','uint','pointer','pointer'],'win64');
 function validTarget(t){return t&&t.composer.readPointer().equals(exe.base.add(0x166f090))&&t.owner.readPointer().equals(exe.base.add(0x16555e8))&&t.owner.add(0x18).readU32()===5&&t.owner.add(0x1c).readU32()===3;}
 function ownerOf(bundle){const composer=bundle.add(0x28).readPointer().sub(0x10),owner=composer.sub(0x4f0),t={composer,owner};return validTarget(t)?t:null;}
 function validTileImage(image){
@@ -110,13 +125,80 @@ function selectTarget(t,image){
   if(!validTileImage(image))return false;
   t.tileVerified=true;
   const candidate=readLayout(t);if(!candidate)return false;
-  target=t;emit('target-ready',{layout:candidate});return true;
+  target=t;if(!bootstrapAwaiting){bootstrap.phase='natural';bootstrapCandidate=null;}emit(bootstrapAwaiting?'bootstrap-target-validated':'target-ready',{layout:candidate});return true;
  }catch(e){
   rejectedCandidates++;
   if(rejectedCandidates<=5)emit('target-skipped',{reason:String(e)});
   return false;
  }
 }
+// Existing, sleeping CKeysComposer workers are QThreads. Enumerate only this
+// process's OS threads, read their TEB/TLS using the exact guarded Qt layout,
+// and require the complete physical MK.2 identity. No heap search/write or
+// explicit thread suspension is requested here. The OS handle is closed on
+// every path (Frida controls its own enumeration internals).
+function discoverBootstrap(now){
+ if(bootstrapCandidate&&now-bootstrapCandidate.discoveredAt>3000){bootstrapCandidate=null;bootstrap.phase='searching';bootstrap.detail='owner-dispatch-timeout';}
+ if(target||bootstrapCandidate||bootstrapCancelled||errors||now-bootstrapLastSearch<1000)return;
+ if(bootstrap.attempts>=60){bootstrap.phase='unavailable';bootstrap.detail='search-limit';return;}
+ bootstrapLastSearch=now;bootstrap.attempts++;
+ const index=core.base.add(0x9cb570).readU32();
+ if(index>4095){bootstrap.detail='invalid-tls-index';return;}
+ const threads=Process.enumerateThreads();
+ if(threads.length>512){bootstrap.detail='thread-limit';return;}
+ const info=Memory.alloc(48),returned=Memory.alloc(4),found=[],qtThreads=[];
+ for(const thread of threads){
+  let handle=null;
+  try{
+   handle=openThread(0x40,0,thread.id);if(handle.isNull())continue;
+   bootstrap.threadQueries++;
+   if(queryThread(handle,0,info,48,returned)<0||returned.readU32()!==48)continue;
+   const teb=info.add(8).readPointer();if(teb.isNull())continue;
+   const tls=teb.add(0x58).readPointer();if(tls.isNull())continue;
+   const block=tls.add(index*8).readPointer();if(block.isNull())continue;
+   const data=block.add(0x68).readPointer();if(data.isNull())continue;
+   const qthread=data.add(0x50).readPointer();if(qthread.isNull())continue;
+   qtThreads.push({id:thread.id,qthread});
+   if(!qthread.readPointer().equals(exe.base.add(0x166f090)))continue;
+   const t={composer:qthread,owner:qthread.sub(0x4f0)};
+   if(validTarget(t)&&validTileImage(qthread.add(0x80)))found.push(t);
+  }catch(_){/* An exiting/non-Qt thread is not a candidate. */}
+  finally{if(handle&&!handle.isNull())closeHandle(handle);}
+ }
+ if(target||bootstrapCancelled||errors)return;
+ bootstrap.candidates=found.length;
+ if(found.length!==1){bootstrap.detail=found.length?'ambiguous-device':'waiting-existing-composer';return;}
+ // QObject affinity is read here, then checked AGAIN from its owning thread
+ // before any signal emission. A mere pointer discovery never reports ready.
+ const t=found[0];let affinity;
+ try{affinity=objectThread(t.owner);}catch(_){bootstrap.detail='owner-changed';return;}
+ const owners=qtThreads.filter(x=>x.qthread.equals(affinity));
+ if(owners.length!==1){bootstrap.detail='owner-thread-unavailable';return;}
+ bootstrapCandidate={...t,threadId:owners[0].id,affinity,discoveredAt:now};bootstrap.phase='waiting-owner-thread';bootstrap.detail=null;
+ // WM_NULL only wakes the existing message loop. It is not a key, page change,
+ // button action, application command or call to a guessed internal method.
+ if(postThreadMessage(owners[0].id,0,ptr(0),ptr(0)))bootstrap.wakeups++;
+ else{bootstrapCandidate=null;bootstrap.phase='searching';bootstrap.detail='owner-wakeup-unavailable';}
+}
+Interceptor.attach(core.base.add(0x25e7f0),{onEnter(){
+ const t=bootstrapCandidate;
+ if(!t||target||bootstrapCancelled||errors||Process.getCurrentThreadId()!==t.threadId)return;
+ bootstrapCandidate=null;
+ try{
+  if(!validTarget(t)||!currentQtThread().equals(t.affinity)||!objectThread(t.owner).equals(t.affinity)){
+   bootstrap.phase='searching';bootstrap.detail='owner-changed';return;
+  }
+  bootstrapAwaiting=true;
+  if(!selectTarget(t,t.composer.add(0x80))){bootstrapAwaiting=false;bootstrap.phase='searching';bootstrap.detail='layout-not-ready';return;}
+  bootstrap.phase='queued-native-probe';
+  if(!queueFrame(true,true))throw Error('Bootstrap native notification not queued');
+ }catch(e){
+  // Losing a not-yet-selected candidate during device teardown is a discovery
+  // miss, not a failure of a native render. Never signal through that pointer.
+  if(!target){bootstrapAwaiting=false;bootstrap.phase='searching';bootstrap.detail='owner-changed';}
+  else fail(e);
+ }
+}});
 // Tag the actual Qt-owned vector, not unrelated native animation notifications.
 Interceptor.attach(exe.base.add(0x177c80),{onEnter(a){
  if(pending&&a[1].equals(pending.input)){pending.copies.add(a[0].toString());}
@@ -151,6 +233,7 @@ Interceptor.replace(exe.base.add(0x419a80),new NativeCallback((owner,vector)=>{
   if(errors||!validTarget(target)||frame.rendered.size!==15||(!frame.restore&&frame.injected.size!==15))
    throw Error('Incomplete native grid: '+JSON.stringify(lastFrameCoverage));
   acknowledged++;if(frame.restore)restores++;
+  if(frame.bootstrap){bootstrapAwaiting=false;bootstrap.phase='complete';bootstrap.detail=null;emit('bootstrap-complete',{rendered:frame.rendered.size,latencyMs:Date.now()-frame.at});}
   pacing.ack(frame,Date.now());
   if(frame.stalled){
    stalled=false;queueRecoveries++;
@@ -160,14 +243,14 @@ Interceptor.replace(exe.base.add(0x419a80),new NativeCallback((owner,vector)=>{
  }catch(e){fail(e);}
  finally{activeFrames.delete(tid);if(pending===frame)pending=null;}
 },'void',['pointer','pointer'],'win64'));
-function queueFrame(isRestore){
+function queueFrame(isRestore,isBootstrap=false){
  const now=Date.now();
  if(!pacing.canQueue(!!target,!!pending,errors,now))return false;
  if(!validTarget(target))throw Error('Target lifetime changed');
  const entries=Memory.alloc(240),v=Memory.alloc(24),argv=Memory.alloc(16);
  for(let i=0;i<15;i++){entries.add(i*16).writeU64(i);entries.add(i*16+8).writeU64(0);}
  v.writePointer(entries);v.add(8).writePointer(entries.add(240));v.add(16).writePointer(entries.add(240));argv.writePointer(ptr(0));argv.add(8).writePointer(v);
- pending={input:v,entries,argv,copies:new Set(),sequence:++sequence,restore:isRestore,at:now,leaseDeadline:deadline,phase:'queued',stalled:false,
+ pending={input:v,entries,argv,copies:new Set(),sequence:++sequence,restore:isRestore,bootstrap:isBootstrap,at:now,leaseDeadline:deadline,phase:'queued',stalled:false,
   inputAt:isRestore?null:pacing.lastInputAt,colors,tiles};
  lastQueued=now;pacing.queued(now,isRestore);activate(target.composer,meta,0,argv);
  if(pending&&pending.copies.size===0)throw Error('Qt vector copy not observed; refusing further notifications');
@@ -264,6 +347,7 @@ Interceptor.attach(exe.base.add(0x5c8550),{onEnter(a){
 }});
 function lease(ms){if(!Number.isInteger(ms)||ms<500||ms>10000)throw Error('lease_ms must be500..10000');const now=Date.now();pacing.input(dirty,now);deadline=now+ms;armed=true;dirty=true;restore=false;}
 function stop(){
+ bootstrapCancelled=true;bootstrapCandidate=null;if(!target)bootstrap.phase='cancelled';
  armed=false;dirty=false;restore=target!==null&&!errors;colors=null;tiles=null;
  // Cancellation belongs to this notification, not to the replaceable global
  // lease. A new input may arm the NEXT image, never revive the stopped one.
@@ -282,16 +366,17 @@ function stallQueuedFrame(frame,now){
 }
 rpc.exports={
  layout,
- status(){return {ready:!!target&&!errors&&!stalled&&!(pending&&pending.renderOverdue),armed,restorationPending:restore||stalled,errors,compositions,paints,paintedKeys:[...paintedKeys],lastFrameCoverage,lastFault,queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,pendingPhase:pending?pending.phase:null,pendingEntered:!!pending&&pending.phase==='rendering',pendingAgeMs:pending?Math.max(0,Date.now()-pending.at):null,stalled,queuedStalls,queueRecoveries,abandonedFrames,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
+ status(){return {ready:!!target&&!bootstrapAwaiting&&!errors&&!stalled&&!(pending&&pending.renderOverdue),bootstrap:{...bootstrap},armed,restorationPending:restore||stalled,errors,compositions,paints,paintedKeys:[...paintedKeys],lastFrameCoverage,lastFault,queued:sequence,acknowledged,restores,rejectedCandidates,pending:pending?pending.sequence:null,pendingPhase:pending?pending.phase:null,pendingEntered:!!pending&&pending.phase==='rendering',pendingAgeMs:pending?Math.max(0,Date.now()-pending.at):null,stalled,queuedStalls,queueRecoveries,abandonedFrames,nativeThreads:[...nativeThreads],uptimeMs:Date.now()-start,pacing:pacing.metrics()};},
  configure(options){return pacing.configure(options);},
- setcolors(value,ms){if(!Array.isArray(value)||value.length!==15||value.some(c=>!Array.isArray(c)||c.length!==3||c.some(v=>!Number.isInteger(v)||v<0||v>255)))throw Error('Expected15 RGB triplets');if(errors)throw Error('Native bridge faulted');if(stalled)return {accepted:false,reason:'native-queue-stalled'};colors=value.map(c=>c.slice());tiles=null;lease(ms);return {accepted:true};},
- setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('Expected311040 BGRA bytes');if(errors)throw Error('Native bridge faulted');if(stalled)return {accepted:false,reason:'native-queue-stalled'};const bytes=new Uint8Array(data);for(let i=3;i<bytes.length;i+=4)if(bytes[i]!==255)throw Error('Only opaque BGRA accepted');tiles=Array.from({length:15},(_,i)=>data.slice(i*20736,(i+1)*20736));colors=null;lease(ms);return {accepted:true};},
+ setcolors(value,ms){if(!Array.isArray(value)||value.length!==15||value.some(c=>!Array.isArray(c)||c.length!==3||c.some(v=>!Number.isInteger(v)||v<0||v>255)))throw Error('Expected15 RGB triplets');if(errors)throw Error('Native bridge faulted');if(bootstrapAwaiting)return {accepted:false,reason:'native-bootstrap-pending'};if(stalled)return {accepted:false,reason:'native-queue-stalled'};colors=value.map(c=>c.slice());tiles=null;lease(ms);return {accepted:true};},
+ setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('Expected311040 BGRA bytes');if(errors)throw Error('Native bridge faulted');if(bootstrapAwaiting)return {accepted:false,reason:'native-bootstrap-pending'};if(stalled)return {accepted:false,reason:'native-queue-stalled'};const bytes=new Uint8Array(data);for(let i=3;i<bytes.length;i+=4)if(bytes[i]!==255)throw Error('Only opaque BGRA accepted');tiles=Array.from({length:15},(_,i)=>data.slice(i*20736,(i+1)*20736));colors=null;lease(ms);return {accepted:true};},
  stop
 };
 setInterval(()=>{
  if(errors)return;
  try{
   const now=Date.now();
+  discoverBootstrap(now);
   if(pending&&pending.phase==='rendering'){
    // Do not mutate a render in progress. Report it, then fail after the native
    // call returns; a genuine slow/hung renderer is NOT a recovered queue stall.

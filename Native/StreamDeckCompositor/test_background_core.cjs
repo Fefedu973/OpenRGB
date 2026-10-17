@@ -9,7 +9,7 @@ const source=fs.readFileSync(require('node:path').join(__dirname,'background-cor
 
 function fixture(options={}) {
  const memory=[],hooks=new Map(),replacements=new Map(),functions=new Map(),events=[],queue=[];
- let address=0x200000000,now=1000,timer,originalCalls=0,gridCalls=0,output=[],descriptors=[],uploaded=[];
+ let address=0x200000000,now=1000,timer,originalCalls=0,gridCalls=0,output=[],descriptors=[],uploaded=[],tid=77,opened=0,closed=0,wakeups=[];
  class Pointer {
   constructor(n){this.n=n instanceof Pointer?n.n:Number(n);}
   add(n){return ptr(this.n+Number(n));}sub(n){return ptr(this.n-Number(n instanceof Pointer?n.n:n));}
@@ -28,7 +28,8 @@ function fixture(options={}) {
  function alloc(size){const p=ptr(address);address+=size+64;memory.push({at:p.n,data:Buffer.alloc(size)});return p;}
  const exe={name:'StreamDeck.exe',path:'C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe',base:ptr(0x100000000),size:0x1aab000};
  const gui={name:'Qt6Gui.dll',base:ptr(0x110000000)},core={name:'Qt6Core.dll',base:ptr(0x120000000)};
- const modules={exe,gui,core},exports=new Map();
+ const kernel={name:'kernel32.dll',base:ptr(0x130000000)},ntdll={name:'ntdll.dll',base:ptr(0x140000000)},user={name:'user32.dll',base:ptr(0x150000000)};
+ const modules={exe,gui,core,kernel,ntdll,user},exports=new Map();
  for(const m of Object.values(modules))m.getExportByName=name=>{
   if(!exports.has(name))exports.set(name,alloc(8));return exports.get(name);
  };
@@ -41,7 +42,7 @@ function fixture(options={}) {
   const key=ptr(p).toString();if(!bypass&&replacements.has(key))return replacements.get(key)(...args);
   const calls=(hooks.get(key)||[]).map(h=>({h,self:{context}}));
   for(const c of calls)c.h.onEnter?.call(c.self,args);
-  const result=functions.get(key)?.(...args)||ptr(0);
+  const result=functions.get(key)?.(...args)??ptr(0);
   for(const c of calls.reverse())c.h.onLeave?.call(c.self,result);
   return result;
  }
@@ -62,11 +63,36 @@ function fixture(options={}) {
  owner.writePointer(exe.base.add(0x16555e8));owner.add(0x18).writeU32(5);owner.add(0x1c).writeU32(3);
  composer.writePointer(exe.base.add(0x166f090));composer.add(0x28).writeU32(72);composer.add(0x2c).writeU32(72);
  composer.add(0x80+16).writePointer(blank); // native blank is shared across factory copies
+ const tlsIndex=ptr(core.base.n+0x9cb570);memory.push({at:tlsIndex.n,data:Buffer.alloc(4)});tlsIndex.writeU32(options.invalidTlsIndex?4096:3);
+ const guiQThread=alloc(32),threadRecords=[];
+ function threadRecord(id,qthread){
+  const teb=alloc(0x60),tls=alloc(32),block=alloc(0x70),td=alloc(0x60);
+  teb.add(0x58).writePointer(tls);tls.add(24).writePointer(block);block.add(0x68).writePointer(td);td.add(0x50).writePointer(qthread);
+  threadRecords.push({id,qthread,teb});return {teb,tls,block,td};
+ }
+ if(options.bootstrap){threadRecord(77,guiQThread);threadRecord(88,composer);}
+ if(options.ambiguousBootstrap){
+  const other=alloc(0x800),c=other.add(0x4f0);other.writeByteArray(owner.readByteArray(0x800));threadRecord(89,c);
+ }
+ if(options.badBootstrapVtable)composer.writePointer(ptr(0));
+ if(options.badBootstrapGeometry)owner.add(0x18).writeU32(6);
+ if(options.badBootstrapTile)composer.add(0x80+16).writePointer(ptr(0));
+ functions.set(kernel.getExportByName('OpenThread').toString(),(access,inherit,id)=>{assert.equal(access,0x40);assert.equal(inherit,0);if(options.denyThread)return ptr(0);opened++;return ptr(id);});
+ functions.set(kernel.getExportByName('CloseHandle').toString(),()=>{closed++;return 1;});
+ functions.set(ntdll.getExportByName('NtQueryInformationThread').toString(),(handle,kind,out,size,length)=>{
+  assert.equal(kind,0);assert.equal(size,48);if(options.badQuery)return -1;
+  out.add(8).writePointer(threadRecords.find(x=>x.id===handle.n).teb);length.writeU32(48);return 0;
+ });
+ functions.set(user.getExportByName('PostThreadMessageW').toString(),(id,message,w,l)=>{assert.equal(message,0);assert(w.isNull()&&l.isNull());wakeups.push(id);return options.failWake?0:1;});
+ let affinity=guiQThread;
+ functions.set(core.getExportByName('?thread@QObject@@QEBAPEAVQThread@@XZ').toString(),o=>{assert(o.equals(owner));return affinity;});
+ functions.set(core.getExportByName('?currentThread@QThread@@SAPEAV1@XZ').toString(),()=>threadRecords.find(x=>x.id===tid)?.qthread??ptr(0));
  let actions=new Set(options.actions??[0,2,4,6,8,10,12,14]);
  const api={};
  functions.set(core.getExportByName('?activate@QMetaObject@@SAXPEAVQObject@@PEBU1@HPEAPEAX@Z').toString(),(c,m,index,argv)=>{
   assert(c.equals(composer));const input=argv.add(8).readPointer(),copy=alloc(24);
   invoke(exe.base.add(0x177c80),[copy,input]);queue.push(()=>invoke(exe.base.add(0x419a80),[owner,copy]));
+  if(options.syncActivate)queue.shift()();
  });
  functions.set(gui.getExportByName('?bits@QImage@@QEAAPEAEXZ').toString(),image=>detach(image));
  functions.set(gui.getExportByName('?fill@QImage@@QEAAXI@Z').toString(),(image,rgb)=>{
@@ -108,17 +134,20 @@ function fixture(options={}) {
    descriptors[key]={cache,destination};uploaded[destination]=output[key];
   }
  });
- const sandbox={Process:{mainModule:exe,arch:'x64',id:1,getModuleByName:n=>Object.values(modules).find(m=>m.name===n),getCurrentThreadId:()=>77},
+ const sandbox={Process:{mainModule:exe,arch:'x64',id:1,getModuleByName:n=>Object.values(modules).find(m=>m.name===n),getCurrentThreadId:()=>tid,enumerateThreads:()=>options.tooManyThreads?Array.from({length:513},(_,i)=>({id:i})):threadRecords.map(x=>({id:x.id}))},
   Memory:{alloc},ptr,NativeFunction:function(p){return (...args)=>invoke(p,args,{},true);},NativeCallback:function(f){return f;},
   Interceptor:{attach(p,h){const key=p.toString();hooks.set(key,[...(hooks.get(key)||[]),h]);},replace(p,f){replacements.set(p.toString(),f);}},
   rpc:{exports:api},send:e=>events.push(e),setInterval:f=>{timer=f;},Date:{now:()=>now},ArrayBuffer,Uint8Array};
  vm.runInNewContext(source,sandbox,{filename:'background-core.js'});
  function naturalEmpty(){const old=actions;actions=new Set();const out=alloc(128);invoke(exe.base.add(0x5c52b0),[composer,out,ptr(0),ptr(0)]);actions=old;}
  return {rpc:sandbox.rpc.exports,events,naturalEmpty,queue,
+  dispatch(threadId=77){const old=tid;tid=threadId;try{invoke(core.base.add(0x25e7f0));}finally{tid=old;}},
+  changeAffinity(){affinity=ptr(0);},get handles(){return {opened,closed};},get wakeups(){return wakeups;},
   tick(ms=60){now+=ms;timer();},advance(ms){now+=ms;},drain(){assert(queue.length);queue.shift()();},
   colors(rgb=[100,50,25]){return sandbox.rpc.exports.setcolors(Array.from({length:15},()=>rgb),2000);},
   untagged(){invoke(exe.base.add(0x419a80),[owner,alloc(24)]);},
   setActions(keys){actions=new Set(keys);},expireTarget(){owner.writePointer(ptr(0));},
+  removeTargetMemory(){memory.splice(memory.findIndex(b=>b.at===owner.n),1);},
   get output(){return output;},get descriptors(){return descriptors;},get uploaded(){return uploaded;},get originalCalls(){return originalCalls;},get gridCalls(){return gridCalls;},
   get blank(){return Buffer.from(pixelStorage.get(blank.n).readByteArray(20736));}
  };
@@ -180,7 +209,7 @@ test('stop while queued and lease expiry render only native restore',()=>{
   assert.equal(f.rpc.status().paints,0);assert.equal(f.rpc.status().restores,1);assert.deepEqual(f.output[0],f.blank);}
 });
 test('exact new native entry/branch guards reject before any interceptor',()=>{
- for(const rva of [0x4164a0,0x5c52b0,0x5c544e,0x5c8b95,0x5c8b51,0x60ed0a])assert.throws(()=>fixture({badGuard:rva}),/Unsupported code/);
+ for(const rva of [0x4164a0,0x5c52b0,0x5c544e,0x5c8b95,0x5c8b51,0x60ed0a,0x26cab0,0x1a54e0,0x100e80,0x25e7f0])assert.throws(()=>fixture({badGuard:rva}),/Unsupported code/);
 });
 
 test('queued delay is nonfatal and keeps exactly one Qt notification until native restoration',()=>{
@@ -286,4 +315,46 @@ test('expired image lease cannot be renewed retroactively while queued',()=>{
   f.tick();f.drain();s=f.rpc.status();assert.equal(s.lastFrameCoverage.restore,false);assert.equal(s.paints,15);
   assert.deepEqual([...f.output[0].subarray(0,4)],[33,22,11,255]);
  }
+});
+
+test('static existing page bootstraps on owner Qt thread without any natural composition or input',()=>{
+ const f=fixture({bootstrap:true});assert.equal(f.rpc.status().compositions,0);assert.equal(f.rpc.status().ready,false);
+ f.tick();assert.equal(f.rpc.status().bootstrap.phase,'waiting-owner-thread');assert.deepEqual(f.wakeups,[77]);assert.deepEqual(f.handles,{opened:2,closed:2});
+ f.dispatch(88);assert.equal(f.queue.length,0,'wrong Qt thread cannot emit the probe');
+ f.dispatch();assert.equal(f.queue.length,1);assert.equal(f.rpc.status().ready,false);assert.equal(f.rpc.status().bootstrap.phase,'queued-native-probe');
+ assert.equal(f.colors().accepted,false,'input is refused until full native ACK');assert.equal(f.rpc.status().armed,false);
+ f.drain();const s=f.rpc.status();assert.equal(s.bootstrap.phase,'complete');assert.equal(s.ready,true);assert.equal(s.errors,0);assert.equal(s.paints,0);
+ assert.equal(s.lastFrameCoverage.rendered,15);assert.equal(s.lastFrameCoverage.restore,true);assert.equal(s.acknowledged,1);
+ f.colors();f.tick();f.drain();assert.equal(f.rpc.status().lastFrameCoverage.injected,15);
+});
+test('bootstrap ACK during activate already carries its identity',()=>{
+ const f=fixture({bootstrap:true,syncActivate:true});f.tick();f.dispatch();const s=f.rpc.status();
+ assert.equal(s.ready,true);assert.equal(s.bootstrap.phase,'complete');assert.equal(s.acknowledged,1);assert.equal(s.errors,0);assert.equal(s.pending,null);
+});
+test('bootstrap rejects non-MK2, invalid tile, TLS, query failure and ambiguity without queuing',()=>{
+ for(const option of ['badBootstrapVtable','badBootstrapGeometry','badBootstrapTile','invalidTlsIndex','badQuery','denyThread','ambiguousBootstrap','tooManyThreads']){
+  const f=fixture({bootstrap:true,[option]:true});f.tick();f.dispatch();assert.equal(f.queue.length,0,option);assert.equal(f.rpc.status().ready,false,option);assert.equal(f.rpc.status().errors,0,option);
+  assert.equal(f.handles.opened,f.handles.closed,option+' closes each opened handle');
+ }
+});
+test('bootstrap revalidates lifetime and owner affinity before signal emission',()=>{
+ for(const change of ['expireTarget','removeTargetMemory','changeAffinity']){
+  const f=fixture({bootstrap:true});f.tick();f[change]();f.dispatch();assert.equal(f.queue.length,0);assert.equal(f.rpc.status().ready,false);assert.equal(f.rpc.status().errors,0);
+  assert.equal(f.rpc.status().bootstrap.detail,'owner-changed');
+ }
+});
+test('bootstrap dispatch timeout and wake failure retry with bounds, natural discovery remains available',()=>{
+ const f=fixture({bootstrap:true});f.tick();f.tick(3001);assert.equal(f.wakeups.length,2);assert.equal(f.queue.length,0);
+ for(let i=0;i<61;i++)f.tick(3001);
+ assert.equal(f.rpc.status().bootstrap.attempts,60);assert.equal(f.rpc.status().bootstrap.detail,'search-limit');assert.equal(f.rpc.status().errors,0);
+ f.naturalEmpty();assert.equal(f.rpc.status().ready,true);assert.equal(f.rpc.status().bootstrap.phase,'natural');
+ const g=fixture({bootstrap:true,failWake:true});g.tick();assert.equal(g.rpc.status().bootstrap.detail,'owner-wakeup-unavailable');g.dispatch();assert.equal(g.queue.length,0);
+});
+test('stop cancels an undispatched bootstrap and never enqueues behind teardown',()=>{
+ const f=fixture({bootstrap:true});f.tick();f.rpc.stop();f.dispatch();f.tick(5000);
+ assert.equal(f.queue.length,0);assert.equal(f.rpc.status().bootstrap.phase,'cancelled');assert.equal(f.rpc.status().ready,false);
+});
+test('bootstrap does not report ready after an incomplete native grid',()=>{
+ const f=fixture({bootstrap:true,skip:14});f.tick();f.dispatch();f.drain();const s=f.rpc.status();
+ assert.equal(s.ready,false);assert.equal(s.errors,1);assert.equal(s.bootstrap.phase,'queued-native-probe');assert.equal(s.paints,0);
 });

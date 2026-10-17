@@ -12,6 +12,7 @@ using Packet = std::array<uint8_t, 20>;
 using RGB = std::array<uint8_t, 3>;
 using Key = std::array<uint8_t, 16>;
 enum class Profile { H6008, H6159 };
+enum class ColorConfirmation { Unconfirmed, ExactRGB, NormalizedWhite };
 
 struct Frame
 {
@@ -25,6 +26,7 @@ Packet RestoreMode(const Packet& reply);
 bool ValidPacket(const Packet& packet);
 bool RestorableMode(Profile profile, const Packet& reply);
 bool MatchesColor(Profile profile, const Packet& reply, RGB rgb);
+ColorConfirmation ConfirmEquivalentColor(Profile profile, const Packet& reply, RGB rgb);
 Packet Color(Profile profile, RGB rgb);
 Packet StartRealtime();
 Packet Realtime(RGB rgb);

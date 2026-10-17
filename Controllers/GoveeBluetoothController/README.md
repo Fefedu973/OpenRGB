@@ -202,8 +202,15 @@ A valid AA05 response with a different color is retried once on the same
 connection. A persistent difference becomes `color_unconfirmed`, without
 disconnecting or resending an unchanged ATT-acknowledged color/brightness.
 Subsequent periodic reads can confirm it again. Diagnostics report the expected
-RGB and observed mode, RGB, flag and secondary RGB, at a bounded rate; a white
-flag01 response is not silently accepted as equivalent to normal flag00 RGB.
+RGB and observed mode, RGB, flag and secondary RGB, at a bounded rate.
+The 17 October live readback established one narrowly defined normalization:
+requested full white (255,255,255), mode02, primary full white, flag01, secondary
+(0,0,0), and zero reserved fields. This confirms the requested full white and
+is logged explicitly as `normalized_white`, distinct from normal flag00 RGB.
+Gray, chromatic requests, nonzero secondary RGB (including D6,E1,FF), different
+modes and malformed packets do not qualify. Exact startup snapshot restoration
+is unchanged. The exception has offline regression tests; its new binary still
+requires live validation.
 Missing replies, invalid checksums and GATT failures retain the transport-error
 path. A pending OFF-to-ON preload still requires matching RGB before ON.
 Black RGB or brightness0 switches the strip OFF only after confirming it was
@@ -293,3 +300,16 @@ change has not yet received physical-device validation.
 
 No Elgato/NVIDIA binaries, private Govee keys, device addresses or captures are
 part of this controller.
+
+### Full-white readback normalization (October 2026)
+
+The live H6159 returned AA05 mode `02`, primary RGB `255,255,255`, flag `01`,
+secondary RGB `0,0,0` after the requested RGB full-white command. This is its
+normalized white mode, not a failed Bluetooth exchange. Strict RGB matching is
+kept for arbitrary colors and snapshots. `ConfirmEquivalentColor` separately
+recognizes only that exact full-white pattern, with valid packet framing and
+reserved fields; tinted/CCT secondary values, gray, other flags and models do
+not qualify. The runtime reports `normalized_white` instead of retrying a color
+write/reconnecting. This also permits a verified white preload before powering
+back on after black or startup. Restoration still preserves the original mode
+packet, including its white/CCT fields.

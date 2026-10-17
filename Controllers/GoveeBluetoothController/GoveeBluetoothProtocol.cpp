@@ -57,6 +57,20 @@ bool MatchesColor(Profile profile, const Packet& reply, RGB rgb)
            (profile != Profile::H6008 || reply[7] == 0);
 }
 
+ColorConfirmation ConfirmEquivalentColor(Profile profile, const Packet& reply, RGB rgb)
+{
+    if(MatchesColor(profile, reply, rgb)) return ColorConfirmation::ExactRGB;
+    // H6159 FW1.07.02 was observed to normalize an RGB full-white command to
+    // flag01 with a zero secondary triplet. This is NOT normal RGB mode and
+    // must not admit gray, chromatic colors, or a secondary white/CCT color.
+    if(profile == Profile::H6159 && rgb == RGB{{255, 255, 255}} &&
+       RestorableMode(profile, reply) && reply[2] == 2 &&
+       std::equal(rgb.begin(), rgb.end(), reply.begin() + 3) && reply[6] == 1 &&
+       reply[7] == 0 && reply[8] == 0 && reply[9] == 0)
+        return ColorConfirmation::NormalizedWhite;
+    return ColorConfirmation::Unconfirmed;
+}
+
 Packet Color(Profile profile, RGB rgb)
 {
     return MakePacket(0x33, 5, {static_cast<uint8_t>(profile == Profile::H6008 ? 13 : 2), rgb[0], rgb[1], rgb[2]});

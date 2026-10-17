@@ -756,9 +756,12 @@ void Controller::Run()
                         configuration.name.c_str(), session->ColorReadbackDiagnostic().c_str());
                     last_color_warning = now;
                 }
-                if(previous_state != session->State())
+                const std::string logged_state = session->State() +
+                    (session->State() == "streaming" && session->NormalizedWhiteConfirmed() ?
+                        " (normalized_white: flag=1 secondary_rgb=0,0,0)" : "");
+                if(previous_state != logged_state)
                 {
-                    previous_state = session->State();
+                    previous_state = logged_state;
                     LOG_INFO("[Govee BLE] %s: %s%s", configuration.name.c_str(), previous_state.c_str(),
                         session->RecoveredBaseline() ? " (new requested RGB recovery baseline)" : "");
                 }

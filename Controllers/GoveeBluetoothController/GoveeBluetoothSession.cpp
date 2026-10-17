@@ -79,6 +79,7 @@ void Session::Initialize(const Frame& frame, uint64_t now_ms)
     realtime_started = false;
     sent = false;
     color_confirmed = false;
+    normalized_white = false;
     resume_preloaded = false;
     color_diagnostic.clear();
     if(!acquired && profile == Profile::H6008 && power_on_acquire && power == 0)
@@ -111,9 +112,15 @@ bool Session::ConfirmClassicColor(RGB expected, uint64_t now_ms)
     Packet reply = transport.Query(5);
     // A valid but different reply is not a dead radio. One fresh read on the
     // same link can resolve a delayed mode notification, without another write.
-    if(!MatchesColor(profile, reply, expected)) reply = transport.Query(5);
+    auto confirmation = ConfirmEquivalentColor(profile, reply, expected);
+    if(confirmation == ColorConfirmation::Unconfirmed)
+    {
+        reply = transport.Query(5);
+        confirmation = ConfirmEquivalentColor(profile, reply, expected);
+    }
     last_color_check_ms = now_ms;
-    color_confirmed = MatchesColor(profile, reply, expected);
+    color_confirmed = confirmation != ColorConfirmation::Unconfirmed;
+    normalized_white = confirmation == ColorConfirmation::NormalizedWhite;
     if(color_confirmed) color_diagnostic.clear();
     else
     {
@@ -145,6 +152,7 @@ bool Session::SendClassicColor(const Frame& frame, bool force, uint64_t now_ms, 
     {
         modified = true;
         transport.Send(Color(profile, frame.rgb));
+        normalized_white = false; // A new command is not a normalized readback.
     }
     // ATT WriteWithResponse acknowledges each write. Keep an application-mode
     // readback on the first color of every connection and before any forced

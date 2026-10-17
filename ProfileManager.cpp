@@ -22,6 +22,7 @@
 #include "ProfileManager.h"
 #include "ResourceManager.h"
 #include "RGBController_Dummy.h"
+#include "GoveeVersionCompatibility.h"
 #include "SettingsManager.h"
 #include "StringUtils.h"
 
@@ -1425,7 +1426,7 @@ bool ProfileManager::LoadControllerFromListWithOptions
         if(                       (profile_controller->GetDeviceType()    == load_controller->GetDeviceType() )
          &&(!check_device_name || (profile_controller->GetName()          == load_controller->GetName()       ))
          &&                       (profile_controller->GetDescription()   == load_controller->GetDescription())
-         &&                       (profile_controller->GetVersion()       == load_controller->GetVersion()    )
+         &&                       govee_configuration::VersionsMatch(profile_controller, load_controller)
          &&                       (profile_controller->GetSerial()        == load_controller->GetSerial()     )
          &&                       (location_check                         == true                             ))
         {

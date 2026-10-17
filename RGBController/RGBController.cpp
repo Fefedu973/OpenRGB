@@ -14,6 +14,7 @@
 #include <thread>
 #include "LogManager.h"
 #include "RGBController.h"
+#include "GoveeVersionCompatibility.h"
 #include "StringUtils.h"
 
 /*---------------------------------------------------------*\
@@ -4680,7 +4681,7 @@ bool RGBController::CompareControllers(RGBController* controller_1, RGBControlle
     if((controller_1->GetDeviceType()    != controller_2->GetDeviceType() )
     || (controller_1->GetName()          != controller_2->GetName()       )
     || (controller_1->GetDescription()   != controller_2->GetDescription())
-    || (controller_1->GetVersion()       != controller_2->GetVersion()    )
+    || !govee_configuration::VersionsMatch(controller_1, controller_2)
     || (controller_1->GetSerial()        != controller_2->GetSerial()     )
     || (location_check                   != true                          ))
     {

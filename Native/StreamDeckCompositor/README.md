@@ -240,9 +240,13 @@ ACK ou arrêt pendant `activate`, arrêt pendant la vérification d'affinité,
 annulation entre validation et timer, grille incomplète et refus des nouveaux guards modifiés.
 Le modèle simule maintenant la suppression des listeners imbriqués constatée
 avec le vrai Frida ; quatre tests échouent sur l'ancien chemin immédiat.
-Les 17 guards ont été comparés aux octets des PE installés. Ces tests ne prouvent
-pas encore un démarrage physique sur page statique ; le candidat doit recevoir
-cette validation séparée avant d'être annoncé comme vérifié sur l'appareil.
+Les 17 guards ont été comparés aux octets des PE installés. Les tests hors matériel
+ne remplacent pas le contrôle physique. Le 17 octobre 2026, le correctif différé
+a également été validé après relance d'OpenRGB, en gardant le même processus
+Elgato et la même page : `bootstrap.phase=complete`, `ready=true`, ACK croissants,
+quinze cases rendues/injectées dont quatre vides, aucune erreur de composition.
+L'utilisateur a confirmé le retour automatique du fond sans changement de page.
+Cette validation concerne les versions exactes protégées par les guards ci-dessus.
 
 
 ## Compilation facultative

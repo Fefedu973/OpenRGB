@@ -30,6 +30,9 @@ device pages. Removing all controller views before plugin unload restores the
 required lifetime order; it does not skip callback deregistration or defer
 cleanup until after the controller is gone.
 
-Offline Qt validation passed. A normal shutdown of the built candidate still
-requires a separate runtime check; offline success alone does not establish
-that every hardware controller completed its shutdown work.
+Offline Qt validation passed. A separate normal exit of the installed build on
+17 October 2026 reached device cleanup and confirmed power-OFF readback for the
+H6159 and all three H6008 bulbs. The process exited and Windows recorded no new
+Application Error/Windows Error Reporting crash event. The exit-code observer
+returned null, so this is not a claim of an independently verified exit code 0,
+nor proof that every hardware driver completed all its cleanup work.

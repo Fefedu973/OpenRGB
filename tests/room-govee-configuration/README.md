@@ -41,4 +41,10 @@ malformed values and incompatible zone topology before configuration callbacks.
 They also cover 12-digit identities and BLE software-only updates.
 
 These tests prove restoration and saving behavior without any device I/O. They
-do not verify a newly installed runtime, alter a layout or change Full Scale.
+do not alter a layout or change Full Scale.
+
+A separate installed-build check on 17 October 2026 verified the actual H61E1
+after the firmware update: all three saved segments were restored, all 30 SDK
+colors were white, and an eight-second passive capture contained 88 valid B0
+frames with 30 white LEDs each. The user confirmed the strip was lit. No test
+color/power commands were sent and the Full Scale file remained byte-identical.

@@ -11,7 +11,7 @@ let target=null,armed=false,deadline=0,dirty=false,restore=false,colors=null,til
 let pending=null,sequence=0,lastQueued=0,errors=0,compositions=0,paints=0,acknowledged=0,restores=0,rejectedCandidates=0;
 let stalled=false,queuedStalls=0,queueRecoveries=0,abandonedFrames=0;
 const bootstrap={phase:'searching',attempts:0,threadQueries:0,candidates:0,wakeups:0,detail:null};
-let bootstrapCandidate=null,bootstrapAwaiting=false,bootstrapCancelled=false,bootstrapLastSearch=-1000;
+let bootstrapCandidate=null,bootstrapAwaiting=false,bootstrapProbeRequested=false,bootstrapCancelled=false,bootstrapLastSearch=-1000;
 // BEGIN FRAME PACING
 class FramePacing {
  constructor(maxFps=20,now=Date.now()){this.maxFps=maxFps;this.nextAt=0;this.reset(now);}
@@ -172,6 +172,7 @@ function discoverBootstrap(now){
  // before any signal emission. A mere pointer discovery never reports ready.
  const t=found[0];let affinity;
  try{affinity=objectThread(t.owner);}catch(_){bootstrap.detail='owner-changed';return;}
+ if(target||bootstrapCancelled||errors)return; // affinity lookup may yield
  const owners=qtThreads.filter(x=>x.qthread.equals(affinity));
  if(owners.length!==1){bootstrap.detail='owner-thread-unavailable';return;}
  bootstrapCandidate={...t,threadId:owners[0].id,affinity,discoveredAt:now};bootstrap.phase='waiting-owner-thread';bootstrap.detail=null;
@@ -188,10 +189,14 @@ Interceptor.attach(core.base.add(0x25e7f0),{onEnter(){
   if(!validTarget(t)||!currentQtThread().equals(t.affinity)||!objectThread(t.owner).equals(t.affinity)){
    bootstrap.phase='searching';bootstrap.detail='owner-changed';return;
   }
+  if(bootstrapCancelled||target||errors)return; // exported calls may yield
   bootstrapAwaiting=true;
   if(!selectTarget(t,t.composer.add(0x80))){bootstrapAwaiting=false;bootstrap.phase='searching';bootstrap.detail='layout-not-ready';return;}
   bootstrap.phase='queued-native-probe';
-  if(!queueFrame(true,true))throw Error('Bootstrap native notification not queued');
+  // Interceptor listeners suppress nested listeners on this thread. Calling
+  // activate here would hide the Qt vector-copy hook, losing our notification
+  // identity. Only validate on the owner thread; the normal timer emits it.
+  bootstrapProbeRequested=true;
  }catch(e){
   // Losing a not-yet-selected candidate during device teardown is a discovery
   // miss, not a failure of a native render. Never signal through that pointer.
@@ -347,7 +352,11 @@ Interceptor.attach(exe.base.add(0x5c8550),{onEnter(a){
 }});
 function lease(ms){if(!Number.isInteger(ms)||ms<500||ms>10000)throw Error('lease_ms must be500..10000');const now=Date.now();pacing.input(dirty,now);deadline=now+ms;armed=true;dirty=true;restore=false;}
 function stop(){
- bootstrapCancelled=true;bootstrapCandidate=null;if(!target)bootstrap.phase='cancelled';
+ bootstrapCancelled=true;bootstrapCandidate=null;
+ // No render/image has been sent for this candidate yet, so there is nothing
+ // to restore. Do not enqueue behind a stop in the owner-validation/timer gap.
+ if(bootstrapProbeRequested){bootstrapProbeRequested=false;bootstrapAwaiting=false;target=null;}
+ if(!target)bootstrap.phase='cancelled';
  armed=false;dirty=false;restore=target!==null&&!errors;colors=null;tiles=null;
  // Cancellation belongs to this notification, not to the replaceable global
  // lease. A new input may arm the NEXT image, never revive the stopped one.
@@ -386,6 +395,19 @@ setInterval(()=>{
   if(pending&&now-pending.at>3000)stallQueuedFrame(pending,now);
   if(stalled)return;
   if(armed&&Date.now()>=deadline){stop();emit('lease-expired');}
+  if(bootstrapProbeRequested){
+   // The owner was checked on its Qt thread. Recheck its lifetime and affinity
+   // after yielding before using the same sender/queued path as normal frames.
+   const t=target;let valid=false;
+   try{valid=!!t&&validTarget(t)&&objectThread(t.owner).equals(t.affinity);}catch(_){}
+   if(!bootstrapProbeRequested||bootstrapCancelled||target!==t)return;
+   if(!valid){bootstrapProbeRequested=false;bootstrapAwaiting=false;target=null;bootstrap.phase='searching';bootstrap.detail='owner-changed';return;}
+   // Publish this state before activate: its cooperative native call may yield
+   // to stop/ACK. Once pending exists, cancellation must retain its identity.
+   bootstrapProbeRequested=false;
+   if(!queueFrame(true,true)&&!bootstrapCancelled&&bootstrapAwaiting&&target===t)bootstrapProbeRequested=true;
+   return;
+  }
   if(restore){if(queueFrame(true))restore=false;}
   else if(dirty&&armed){if(queueFrame(false))dirty=false;}
  }catch(e){fail(e);}

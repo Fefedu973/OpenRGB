@@ -209,13 +209,23 @@ Le candidat doit vérifier les deux vtables natives, l'offset du compositeur
 physique `owner+0x4f0`, la grille 5×3 et l'image native existante de 72×72.
 Un message Windows `WM_NULL` réveille le thread propriétaire, sans action de
 bouton, changement de page ou profil. À l'entrée de sa boucle Qt, le script
-revérifie le propriétaire et son affinité avant d'émettre **la même notification
-Qt marquée** que les images normales. Celle-ci effectue une première
+revérifie le propriétaire et son affinité, puis programme le probe. Le timer
+existant revérifie cette identité et émet **la même notification Qt marquée**
+que les images normales, hors du callback Interceptor. Celle-ci effectue une première
 restauration native complète, sans injection de pixels. `ready` reste faux et
 les nouvelles images sont refusées jusqu'à son ACK des quinze cases. Le chemin
 de composition des icônes demeure inchangé. Un arrêt annule tout candidat qui
 n'a pas encore été envoyé ; une notification déjà envoyée reste suivie jusqu'à
 son retour comme les autres restaurations.
+
+Cette séparation corrige l'échec réel du premier candidat : appeler `activate`
+depuis `Interceptor.onEnter` masquait le listener de copie Qt et produisait
+`Qt vector copy not observed`, sans ACK. Le test Frida 17.18 dans un enfant
+synthétique reproduit le mécanisme : hook A → `NativeFunction` B n'appelle pas
+le hook B (`nested=0`), alors que le même appel différé au timer l'appelle
+(`deferred=1`). La garde de copie n'est pas supprimée. Le flag de probe est
+consommé avant `activate`, afin qu'un arrêt pendant cet appel coopératif conserve
+la notification déjà envoyée jusqu'à son ACK.
 
 Le statut `bootstrap` expose uniquement `phase`, `detail` et quatre compteurs
 (`attempts`, `threadQueries`, `candidates`, `wakeups`), sans adresse mémoire.
@@ -223,10 +233,13 @@ Pour valider le démarrage réel sans geste, exiger `phase=complete`, `ready=tru
 une couverture native de quinze cases et des ACK de nouvelles images. `natural`
 indique que le chemin historique a trouvé la cible avant le bootstrap.
 
-Validation hors matériel : 28 groupes du script de production passent, dont
+Validation hors matériel : 32 groupes du script de production passent, dont
 page statique sans composition préalable, mauvais thread/candidat/affinité,
 mémoire du candidat libérée, ambiguïté, bornes/retry, arrêt avant dispatch,
-ACK pendant `activate`, grille incomplète et refus des nouveaux guards modifiés.
+ACK ou arrêt pendant `activate`, arrêt pendant la vérification d'affinité,
+annulation entre validation et timer, grille incomplète et refus des nouveaux guards modifiés.
+Le modèle simule maintenant la suppression des listeners imbriqués constatée
+avec le vrai Frida ; quatre tests échouent sur l'ancien chemin immédiat.
 Les 17 guards ont été comparés aux octets des PE installés. Ces tests ne prouvent
 pas encore un démarrage physique sur page statique ; le candidat doit recevoir
 cette validation séparée avant d'être annoncé comme vérifié sur l'appareil.

@@ -9,6 +9,21 @@
 #include <sys/stat.h>
 #include <iostream>
 
+// Natural native-thread entry points for testing Interceptor callback context.
+// Distinct nontrivial bodies prevent linker folding and leave hookable prologues.
+extern "C" __declspec(dllexport) __declspec(noinline) int RoomSyntheticOuter(int value)
+{
+    volatile int result=value;
+    for(int i=0;i<8;++i)result=result*3+i;
+    return result;
+}
+extern "C" __declspec(dllexport) __declspec(noinline) int RoomSyntheticInner(int value)
+{
+    volatile int result=value;
+    for(int i=0;i<8;++i)result=result*7+i;
+    return result;
+}
+
 static void Check(bool value,const char* why){if(!value)throw std::runtime_error(why);}
 template<class F>static void Reject(F fn){bool failed=false;try{fn();}catch(const std::exception&){failed=true;}Check(failed,"Expected rejection");}
 struct Child {
@@ -26,7 +41,8 @@ int wmain(int argc,wchar_t** argv)
 {
     if(argc==3 && std::wstring(argv[1])==L"--child") {
         HANDLE event=OpenEventW(SYNCHRONIZE,FALSE,argv[2]);if(!event)return 2;
-        WaitForSingleObject(event,30000);CloseHandle(event);return 0;
+        for(int i=0;i<300 && WaitForSingleObject(event,100)==WAIT_TIMEOUT;++i)RoomSyntheticOuter(i);
+        CloseHandle(event);return 0;
     }
     try {
         std::cerr<<"test: guards"<<std::endl;
@@ -49,6 +65,22 @@ int wmain(int argc,wchar_t** argv)
         const char* synthetic=R"JS(
 let armed=false,deadline=0,frames=0;
 rpc.exports={configure(o){return o;},layout(){return {width:480,height:272};},
+reentrancy(){return new Promise(resolve=>{
+ const outer=Process.mainModule.getExportByName('RoomSyntheticOuter');
+ const inner=Process.mainModule.getExportByName('RoomSyntheticInner');
+ const callInner=new NativeFunction(inner,'int',['int']);
+ let innerCalls=0,entered=false;
+ const innerHook=Interceptor.attach(inner,{onEnter(){innerCalls++;}});
+ const outerHook=Interceptor.attach(outer,{onEnter(){
+  if(entered)return;entered=true;
+  callInner(7);const nested=innerCalls;
+  setTimeout(()=>{
+   const before=innerCalls;callInner(7);const deferred=innerCalls-before;
+   outerHook.detach();innerHook.detach();
+   resolve({nested,deferred});
+  },0);
+ }});
+});},
 status(){return {ready:true,armed:armed&&Date.now()<deadline,pending:null,restorationPending:false,errors:0,frames};},
 setframe(ms,data){if(!(data instanceof ArrayBuffer)||data.byteLength!==311040)throw Error('frame');let b=new Uint8Array(data);if(b[0]!==173||b[b.length-1]!==255)throw Error('bytes');frames++;armed=true;deadline=Date.now()+ms;return {accepted:true,bytes:b.length,blue:b[0]};},
 fault(){send({event:'native-error',message:'synthetic coverage failure',stack:'fixture:1'});return {};},
@@ -59,6 +91,10 @@ stall(){return new Promise(()=>{});},stop(){armed=false;return {stopped:true,res
         std::cerr<<"test: RPC"<<std::endl;
         Check(engine.Call("configure",room_sd::Json::array({{{"maxFps",20}}}))["maxFps"]==20,"RPC configure");
         Check(engine.Call("layout")["width"]==480,"RPC layout");
+        const auto reentrancy=engine.Call("reentrancy");
+        std::cout<<"Interceptor reentrancy: "<<reentrancy.dump()<<"\n";
+        Check(reentrancy["nested"]==0,"NativeFunction inside Interceptor suppresses nested listener");
+        Check(reentrancy["deferred"]==1,"Timer outside Interceptor observes native listener");
         std::vector<unsigned char> frame(311040,0);frame[0]=173;for(std::size_t i=3;i<frame.size();i+=4)frame[i]=255;
         const auto start=room_sd::Clock::now();
         for(int i=0;i<20;++i)Check(engine.Call("setframe",room_sd::Json::array({100}),frame.data(),frame.size())["accepted"]==true,"Binary frame RPC");

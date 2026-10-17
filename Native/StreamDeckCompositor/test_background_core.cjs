@@ -9,7 +9,7 @@ const source=fs.readFileSync(require('node:path').join(__dirname,'background-cor
 
 function fixture(options={}) {
  const memory=[],hooks=new Map(),replacements=new Map(),functions=new Map(),events=[],queue=[];
- let address=0x200000000,now=1000,timer,originalCalls=0,gridCalls=0,output=[],descriptors=[],uploaded=[],tid=77,opened=0,closed=0,wakeups=[];
+ let address=0x200000000,now=1000,timer,originalCalls=0,gridCalls=0,output=[],descriptors=[],uploaded=[],tid=77,opened=0,closed=0,wakeups=[],listenerDepth=0;
  class Pointer {
   constructor(n){this.n=n instanceof Pointer?n.n:Number(n);}
   add(n){return ptr(this.n+Number(n));}sub(n){return ptr(this.n-Number(n instanceof Pointer?n.n:n));}
@@ -40,10 +40,13 @@ function fixture(options={}) {
  }
  function invoke(p,args=[],context={},bypass=false){
   const key=ptr(p).toString();if(!bypass&&replacements.has(key))return replacements.get(key)(...args);
-  const calls=(hooks.get(key)||[]).map(h=>({h,self:{context}}));
-  for(const c of calls)c.h.onEnter?.call(c.self,args);
+  // Frida 17.18's real synthetic-child test establishes this listener masking:
+  // NativeFunction called inside an Interceptor listener does not re-enter
+  // other listeners on that thread. Replacement callbacks are a distinct path.
+  const calls=(listenerDepth?[]:(hooks.get(key)||[])).map(h=>({h,self:{context}}));
+  for(const c of calls){listenerDepth++;try{c.h.onEnter?.call(c.self,args);}finally{listenerDepth--;}}
   const result=functions.get(key)?.(...args)??ptr(0);
-  for(const c of calls.reverse())c.h.onLeave?.call(c.self,result);
+  for(const c of calls.reverse()){listenerDepth++;try{c.h.onLeave?.call(c.self,result);}finally{listenerDepth--;}}
   return result;
  }
  function point(rva,context){invoke(exe.base.add(rva),[],context);}
@@ -84,12 +87,13 @@ function fixture(options={}) {
   out.add(8).writePointer(threadRecords.find(x=>x.id===handle.n).teb);length.writeU32(48);return 0;
  });
  functions.set(user.getExportByName('PostThreadMessageW').toString(),(id,message,w,l)=>{assert.equal(message,0);assert(w.isNull()&&l.isNull());wakeups.push(id);return options.failWake?0:1;});
- let affinity=guiQThread;
- functions.set(core.getExportByName('?thread@QObject@@QEBAPEAVQThread@@XZ').toString(),o=>{assert(o.equals(owner));return affinity;});
+ let affinity=guiQThread,affinityReads=0;
+ functions.set(core.getExportByName('?thread@QObject@@QEBAPEAVQThread@@XZ').toString(),o=>{assert(o.equals(owner));options.duringAffinityRead?.(++affinityReads,sandbox.rpc.exports);return affinity;});
  functions.set(core.getExportByName('?currentThread@QThread@@SAPEAV1@XZ').toString(),()=>threadRecords.find(x=>x.id===tid)?.qthread??ptr(0));
  let actions=new Set(options.actions??[0,2,4,6,8,10,12,14]);
  const api={};
  functions.set(core.getExportByName('?activate@QMetaObject@@SAXPEAVQObject@@PEBU1@HPEAPEAX@Z').toString(),(c,m,index,argv)=>{
+  options.duringActivate?.(sandbox.rpc.exports);
   assert(c.equals(composer));const input=argv.add(8).readPointer(),copy=alloc(24);
   invoke(exe.base.add(0x177c80),[copy,input]);queue.push(()=>invoke(exe.base.add(0x419a80),[owner,copy]));
   if(options.syncActivate)queue.shift()();
@@ -321,14 +325,16 @@ test('static existing page bootstraps on owner Qt thread without any natural com
  const f=fixture({bootstrap:true});assert.equal(f.rpc.status().compositions,0);assert.equal(f.rpc.status().ready,false);
  f.tick();assert.equal(f.rpc.status().bootstrap.phase,'waiting-owner-thread');assert.deepEqual(f.wakeups,[77]);assert.deepEqual(f.handles,{opened:2,closed:2});
  f.dispatch(88);assert.equal(f.queue.length,0,'wrong Qt thread cannot emit the probe');
- f.dispatch();assert.equal(f.queue.length,1);assert.equal(f.rpc.status().ready,false);assert.equal(f.rpc.status().bootstrap.phase,'queued-native-probe');
+ f.dispatch();assert.equal(f.queue.length,0,'native notification must be outside the Interceptor listener');assert.equal(f.rpc.status().ready,false);assert.equal(f.rpc.status().bootstrap.phase,'queued-native-probe');
+ assert.equal(f.rpc.status().errors,0);assert.equal(f.colors().accepted,false);
+ f.tick();assert.equal(f.queue.length,1);assert.equal(f.rpc.status().errors,0,'Qt copy listener observes the deferred notification');
  assert.equal(f.colors().accepted,false,'input is refused until full native ACK');assert.equal(f.rpc.status().armed,false);
  f.drain();const s=f.rpc.status();assert.equal(s.bootstrap.phase,'complete');assert.equal(s.ready,true);assert.equal(s.errors,0);assert.equal(s.paints,0);
  assert.equal(s.lastFrameCoverage.rendered,15);assert.equal(s.lastFrameCoverage.restore,true);assert.equal(s.acknowledged,1);
  f.colors();f.tick();f.drain();assert.equal(f.rpc.status().lastFrameCoverage.injected,15);
 });
 test('bootstrap ACK during activate already carries its identity',()=>{
- const f=fixture({bootstrap:true,syncActivate:true});f.tick();f.dispatch();const s=f.rpc.status();
+ const f=fixture({bootstrap:true,syncActivate:true});f.tick();f.dispatch();f.tick();const s=f.rpc.status();
  assert.equal(s.ready,true);assert.equal(s.bootstrap.phase,'complete');assert.equal(s.acknowledged,1);assert.equal(s.errors,0);assert.equal(s.pending,null);
 });
 test('bootstrap rejects non-MK2, invalid tile, TLS, query failure and ambiguity without queuing',()=>{
@@ -354,7 +360,33 @@ test('stop cancels an undispatched bootstrap and never enqueues behind teardown'
  const f=fixture({bootstrap:true});f.tick();f.rpc.stop();f.dispatch();f.tick(5000);
  assert.equal(f.queue.length,0);assert.equal(f.rpc.status().bootstrap.phase,'cancelled');assert.equal(f.rpc.status().ready,false);
 });
+test('stop between owner validation and timer cancels the unqueued probe without restoration',()=>{
+ const f=fixture({bootstrap:true});f.tick();f.dispatch();f.rpc.stop();f.tick(5000);
+ const s=f.rpc.status();assert.equal(f.queue.length,0);assert.equal(s.queued,0);assert.equal(s.bootstrap.phase,'cancelled');
+ assert.equal(s.ready,false);assert.equal(s.restorationPending,false);assert.equal(s.errors,0);
+});
+test('deferred bootstrap rechecks lifetime and affinity before activating outside the listener',()=>{
+ for(const change of ['expireTarget','removeTargetMemory','changeAffinity']){
+  const f=fixture({bootstrap:true});f.tick();f.dispatch();f[change]();f.tick();const s=f.rpc.status();
+  assert.equal(f.queue.length,0,change);assert.equal(s.ready,false,change);assert.equal(s.errors,0,change);
+  assert.equal(s.bootstrap.detail,'owner-changed',change);
+ }
+});
+test('stop during exported affinity validation cannot resurrect an unqueued bootstrap',()=>{
+ for(const read of [1,2,3]){
+  const f=fixture({bootstrap:true,duringAffinityRead(n,rpc){if(n===read)rpc.stop();}});f.tick();f.dispatch();f.tick();
+  const s=f.rpc.status();assert.equal(f.queue.length,0);assert.equal(s.ready,false);assert.equal(s.errors,0);assert.equal(s.bootstrap.phase,'cancelled');
+  if(read===1)assert.equal(f.wakeups.length,0,'cancelled discovery must not wake the owner');
+ }
+});
+test('stop during deferred activate retains the pending Qt notification until its restore ACK',()=>{
+ const f=fixture({bootstrap:true,duringActivate(rpc){rpc.stop();}});f.tick();f.dispatch();f.tick();
+ assert.equal(f.queue.length,1);assert.equal(f.rpc.status().ready,false);assert.equal(f.rpc.status().errors,0);
+ f.drain();const s=f.rpc.status();assert.equal(s.acknowledged,1);assert.equal(s.restores,1);assert.equal(s.paints,0);
+ assert.equal(s.pending,null);assert.equal(s.errors,0);assert.equal(s.armed,false);assert.equal(s.restorationPending,false);
+ f.tick();assert.equal(f.queue.length,0);
+});
 test('bootstrap does not report ready after an incomplete native grid',()=>{
- const f=fixture({bootstrap:true,skip:14});f.tick();f.dispatch();f.drain();const s=f.rpc.status();
+ const f=fixture({bootstrap:true,skip:14});f.tick();f.dispatch();f.tick();f.drain();const s=f.rpc.status();
  assert.equal(s.ready,false);assert.equal(s.errors,1);assert.equal(s.bootstrap.phase,'queued-native-probe');assert.equal(s.paints,0);
 });

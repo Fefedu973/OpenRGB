@@ -12,7 +12,7 @@ using Packet = std::array<uint8_t, 20>;
 using RGB = std::array<uint8_t, 3>;
 using Key = std::array<uint8_t, 16>;
 enum class Profile { H6008, H6159 };
-enum class ColorConfirmation { Unconfirmed, ExactRGB, NormalizedWhite };
+enum class ColorConfirmation { Unconfirmed, ExactRGB, ExplicitWhite };
 
 struct Frame
 {

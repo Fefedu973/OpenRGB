@@ -757,8 +757,8 @@ void Controller::Run()
                     last_color_warning = now;
                 }
                 const std::string logged_state = session->State() +
-                    (session->State() == "streaming" && session->NormalizedWhiteConfirmed() ?
-                        " (normalized_white: flag=1 secondary_rgb=0,0,0)" : "");
+                    (session->State() == "streaming" && session->ExplicitWhiteConfirmed() ?
+                        " (explicit_white: flag=1 secondary_rgb=255,255,255)" : "");
                 if(previous_state != logged_state)
                 {
                     previous_state = logged_state;

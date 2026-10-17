@@ -203,14 +203,16 @@ connection. A persistent difference becomes `color_unconfirmed`, without
 disconnecting or resending an unchanged ATT-acknowledged color/brightness.
 Subsequent periodic reads can confirm it again. Diagnostics report the expected
 RGB and observed mode, RGB, flag and secondary RGB, at a bounded rate.
-The 17 October live readback established one narrowly defined normalization:
-requested full white (255,255,255), mode02, primary full white, flag01, secondary
-(0,0,0), and zero reserved fields. This confirms the requested full white and
-is logged explicitly as `normalized_white`, distinct from normal flag00 RGB.
-Gray, chromatic requests, nonzero secondary RGB (including D6,E1,FF), different
-modes and malformed packets do not qualify. Exact startup snapshot restoration
-is unchanged. The exception has offline regression tests; its new binary still
-requires live validation.
+Full white (255,255,255) uses the H6159 white selector explicitly: mode02,
+primary full white, flag01, secondary full white, and zero reserved fields.
+The matching reply is logged as `explicit_white`, distinct from normal flag00
+RGB. A flag01/secondary-zero reply does not confirm white: the 17 October
+OFF-to-white reproduction remained optically dark despite power1, brightness255
+and primary full-white readback. The explicit secondary-white command remained
+stable for ten seconds and was visually confirmed by the user. Gray, chromatic
+requests, tinted/CCT secondary RGB (including D6,E1,FF), different modes and
+malformed packets do not qualify for this special confirmation. H6008 and
+ordinary RGB packets are unchanged, as is exact startup snapshot restoration.
 Missing replies, invalid checksums and GATT failures retain the transport-error
 path. A pending OFF-to-ON preload still requires matching RGB before ON.
 Black RGB or brightness0 switches the strip OFF only after confirming it was
@@ -301,15 +303,28 @@ change has not yet received physical-device validation.
 No Elgato/NVIDIA binaries, private Govee keys, device addresses or captures are
 part of this controller.
 
-### Full-white readback normalization (October 2026)
+### Explicit full-white encoding (17 October 2026)
 
-The live H6159 returned AA05 mode `02`, primary RGB `255,255,255`, flag `01`,
-secondary RGB `0,0,0` after the requested RGB full-white command. This is its
-normalized white mode, not a failed Bluetooth exchange. Strict RGB matching is
-kept for arbitrary colors and snapshots. `ConfirmEquivalentColor` separately
-recognizes only that exact full-white pattern, with valid packet framing and
-reserved fields; tinted/CCT secondary values, gray, other flags and models do
-not qualify. The runtime reports `normalized_white` instead of retrying a color
-write/reconnecting. This also permits a verified white preload before powering
-back on after black or startup. Restoration still preserves the original mode
-packet, including its white/CCT fields.
+The old RGB command `02 FF FF FF 00 00 00 00` could read back as
+`02 FF FF FF 01 00 00 00` for ten seconds while power and brightness also read
+as full. That response was initially accepted as normalized white, but the
+user's OFF-to-white test exposed a brief flash followed by darkness. Readback
+alone had not established optical equivalence.
+
+The targeted comparison used the same production Windows transport and a
+suspended OpenRGB worker. The explicit command `02 FF FF FF 01 FF FF FF`
+remained in AA05 at +0, +1.5, +3 and +10 seconds; the user confirmed stable
+white during this second passage. The complete initial AA01/AA04/AA05 snapshot
+was then restored and verified exactly. The firmware already reported power1
+after the brightness/color preload, before the explicit ON command: preload
+ordering is not a guarantee that the strip stays physically off until ON.
+
+Only H6159 full-white requests use this packet. `ConfirmEquivalentColor`
+accepts its exact flag01/secondary-white form, and rejects the formerly
+accepted secondary-zero form. Strict flag00 RGB matching and raw snapshot
+restoration remain unchanged. The log label is now `explicit_white`.
+Offline regressions cover OFF-to-white, thirty seconds of unchanged white
+without repeated mode writes, 50% brightness, brightness-only updates, rejected
+secondary-zero replies without forced ON/rewrite loops, and black-exit policy.
+The physical comparison validates the packet; the rebuilt production binary
+still requires the coordinated installation and profile-transition check.

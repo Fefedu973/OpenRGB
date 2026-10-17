@@ -18,7 +18,7 @@ struct Fake : Transport
     bool fail_connect = false;
     bool stale_reply_after_write = false;
     bool return_stale_reply = false;
-    bool normalize_full_white = false;
+    bool zero_secondary_white_reply = false;
     Packet stale_mode{};
     uint8_t power = 1, brightness = 151;
     Packet mode;
@@ -40,8 +40,8 @@ struct Fake : Transport
             if(drop_color_writes) return;
             stale_mode = mode;return_stale_reply = stale_reply_after_write;
             mode = p; mode[0] = 0xAA; mode[19] ^= 0x33 ^ 0xAA;
-            if(normalize_full_white && mode[2] == 2 && mode[3] == 255 && mode[4] == 255 && mode[5] == 255 && mode[6] == 0)
-            { mode[6] = 1; mode[19] ^= 1; }
+            if(zero_secondary_white_reply && mode[2] == 2 && mode[3] == 255 && mode[4] == 255 && mode[5] == 255 && mode[6] == 1)
+            { mode = MakePacket(0xAA,5,{2,255,255,255,1,0,0,0}); }
         }
     }
     Packet Query(uint8_t command) override
@@ -92,9 +92,9 @@ int main()
     check("brightness scaling and real zero");
     {
         const RGB white{{255,255,255}};
-        const auto normalized=MakePacket(0xAA,5,{2,255,255,255,1,0,0,0});
+        const auto normalized=MakePacket(0xAA,5,{2,255,255,255,1,255,255,255});
         assert(!MatchesColor(Profile::H6159,normalized,white));
-        assert(ConfirmEquivalentColor(Profile::H6159,normalized,white)==ColorConfirmation::NormalizedWhite);
+        assert(ConfirmEquivalentColor(Profile::H6159,normalized,white)==ColorConfirmation::ExplicitWhite);
         assert(ConfirmEquivalentColor(Profile::H6159,MakePacket(0xAA,5,{2,255,255,255}),white)==ColorConfirmation::ExactRGB);
         assert(ConfirmEquivalentColor(Profile::H6008,normalized,white)==ColorConfirmation::Unconfirmed);
         for(const RGB expected : {RGB{{254,254,254}},RGB{{255,254,255}},RGB{{255,0,0}}})
@@ -109,33 +109,66 @@ int main()
             // flag00 is intentionally still exact RGB, not the normalized exception.
             if(index!=6) assert(ConfirmEquivalentColor(Profile::H6159,changed,white)==ColorConfirmation::Unconfirmed);
         }
+        assert(Color(Profile::H6159,white)==MakePacket(0x33,5,{2,255,255,255,1,255,255,255}));
+        assert(Color(Profile::H6008,white)==MakePacket(0x33,5,{13,255,255,255}));
+        for(const RGB rgb:{RGB{{254,254,254}},RGB{{255,254,255}},RGB{{0,0,0}}})
+            assert(Color(Profile::H6159,rgb)==MakePacket(0x33,5,{2,rgb[0],rgb[1],rgb[2]}));
+        assert(ConfirmEquivalentColor(Profile::H6159,MakePacket(0xAA,5,{2,255,255,255,1,0,0,0}),white)==ColorConfirmation::Unconfirmed);
         auto corrupt=normalized;corrupt[19]^=1;
         assert(ConfirmEquivalentColor(Profile::H6159,corrupt,white)==ColorConfirmation::Unconfirmed);
         assert(ConfirmEquivalentColor(Profile::H6159,MakePacket(0xAA,5,{2,255,255,255,1,214,225,255}),white)==ColorConfirmation::Unconfirmed);
-        check("normalized white accepts only observed H6159 full-white/flag01/secondary-zero valid AA05");
+        check("explicit white accepts only H6159 full-white/flag01/secondary-FFF valid AA05");
     }
     {
-        Fake radio(Profile::H6159);radio.power=0;radio.normalize_full_white=true;
+        Fake radio(Profile::H6159);radio.power=0;
         const auto before=radio.mode;Session session(Profile::H6159,radio,true);
         session.Step({{{255,255,255}},100},0);
-        assert(radio.power==1 && session.State()=="streaming" && session.NormalizedWhiteConfirmed());
+        assert(radio.power==1 && session.State()=="streaming" && session.ExplicitWhiteConfirmed());
         assert(radio.writes.size()==3 && radio.writes[0][1]==4 && radio.writes[1][1]==5 && radio.writes[2]==MakePacket(0x33,1,{1}));
-        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==2); // No mismatch retry for a valid normalization.
-        const auto count=radio.writes.size();session.Step({{{255,255,255}},100},1500);
-        assert(radio.writes.size()==count && radio.connects==1 && session.NormalizedWhiteConfirmed());
+        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==2); // No mismatch retry for a valid explicit-white response.
+        const auto count=radio.writes.size();
+        for(unsigned t=100;t<=30000;t+=100)
+        {
+            session.Step({{{255,255,255}},100},t);
+            assert(radio.writes.size()==count && radio.power==1 && session.State()=="streaming" && session.ExplicitWhiteConfirmed());
+        }
+        assert(radio.connects==1);
         session.Release();assert(radio.power==0 && radio.mode==before && radio.brightness==151);
-        check("initial OFF full-white normalization confirms before ON; no rewrite and exact original restore");
+        check("initial OFF explicit-white confirms before ON; no rewrite and exact original restore");
     }
     {
-        Fake radio(Profile::H6159);radio.normalize_full_white=true;Session session(Profile::H6159,radio);
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
         session.Step({{{0,0,0}},100},0);assert(radio.power==0);
         session.Step({{{255,255,255}},100},100);
-        assert(radio.power==1 && session.State()=="streaming" && session.NormalizedWhiteConfirmed());
-        session.Step({{{10,20,30}},100},200);assert(!session.NormalizedWhiteConfirmed());
+        assert(radio.power==1 && session.State()=="streaming" && session.ExplicitWhiteConfirmed());
+        session.Step({{{10,20,30}},100},200);assert(!session.ExplicitWhiteConfirmed());
         session.Step({{{0,0,0}},100},300);assert(radio.power==0);
-        session.Step({{{255,255,255}},100},400);assert(session.NormalizedWhiteConfirmed() && radio.power==1);
+        session.Step({{{255,255,255}},100},400);assert(session.ExplicitWhiteConfirmed() && radio.power==1);
         session.Release(true);assert(radio.power==0 && session.State()=="black_exit_confirmed");
-        check("owned blackout resumes normalized white and exit still verifies OFF; diagnostic never labels later chromatic commands");
+        check("owned blackout resumes explicit white and exit still verifies OFF; diagnostic never labels later chromatic commands");
+    }
+    {
+        Fake radio(Profile::H6159);radio.power=0;radio.zero_secondary_white_reply=true;
+        Session session(Profile::H6159,radio,true);session.Step({{{255,255,255}},100},0);
+        assert(radio.power==0 && session.State()=="color_unconfirmed" && !session.ExplicitWhiteConfirmed());
+        const auto writes=radio.writes.size();
+        for(unsigned t=100;t<=3000;t+=100)session.Step({{{255,255,255}},100},t);
+        assert(radio.power==0 && radio.writes.size()==writes && radio.connects==1);
+        assert(radio.writes[0][1]==4 && radio.writes[1]==MakePacket(0x33,5,{2,255,255,255,1,255,255,255}));
+        check("secondary-zero white is unconfirmed; no forced ON or identical color rewrite loop");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{0,0,0}},100},0);const auto before=radio.writes.size();
+        session.Step({{{255,255,255}},50},100);
+        assert(radio.power==1 && radio.brightness==128 && session.ExplicitWhiteConfirmed());
+        assert(radio.writes[before]==MakePacket(0x33,4,{128}));
+        assert(radio.writes[before+1]==MakePacket(0x33,5,{2,255,255,255,1,255,255,255}));
+        assert(radio.writes[before+2]==MakePacket(0x33,1,{1}));
+        const auto count=radio.writes.size();session.Step({{{255,255,255}},50},1500);assert(radio.writes.size()==count);
+        session.Step({{{255,255,255}},25},1600);
+        assert(radio.writes.size()==count+1 && radio.writes.back()==MakePacket(0x33,4,{64}));
+        check("explicit white at 50 percent uses raw128; later brightness-only change keeps white packet stable");
     }
     {
         Fake radio(Profile::H6008);radio.Connect();

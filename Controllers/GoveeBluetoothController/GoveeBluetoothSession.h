@@ -16,8 +16,8 @@ public:
     std::string State() const { return state; }
     bool RecoveredBaseline() const { return recovered_baseline; }
     const std::string& ColorReadbackDiagnostic() const { return color_diagnostic; }
-    bool NormalizedWhiteConfirmed() const
-    { return color_confirmed && normalized_white && last_frame.rgb == RGB{{255, 255, 255}}; }
+    bool ExplicitWhiteConfirmed() const
+    { return color_confirmed && explicit_white && last_frame.rgb == RGB{{255, 255, 255}}; }
 private:
     void Initialize(const Frame& frame, uint64_t now_ms);
     void ObservePower(uint8_t current);
@@ -40,7 +40,7 @@ private:
     bool external_off = false;
     bool sent = false;
     bool color_confirmed = false;
-    bool normalized_white = false;
+    bool explicit_white = false;
     bool resume_preloaded = false;
     std::string color_diagnostic;
     uint8_t power = 0;

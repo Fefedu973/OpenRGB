@@ -629,6 +629,11 @@ void OpenRGBDialog::closeEvent(QCloseEvent *event)
         \*-------------------------------------------------*/
         ResourceManager::get()->UnregisterResourceManagerCallback(OpenRGBDialogResourceManagerCallback, this);
 
+        // Plugin unload can delete virtual controllers. Once list callbacks are
+        // disconnected, their pages will no longer be removed by that change.
+        // Destroy every device view now, while its controller is still alive.
+        ClearDevicesList();
+
         plugin_manager->UnloadPlugins();
 
         if(ResourceManager::get()->GetProfileManager()->LoadAutoProfileExit())
@@ -983,23 +988,31 @@ void OpenRGBDialog::AddServerTab()
 
 void OpenRGBDialog::ClearDevicesList()
 {
-    for(int tab_idx = 0; tab_idx < ui->DevicesTabBar->count(); tab_idx++)
+    for(int tab_idx = ui->DevicesTabBar->count() - 1; tab_idx >= 0; --tab_idx)
     {
-        if(dynamic_cast<OpenRGBPluginContainer*>(ui->DevicesTabBar->widget(tab_idx)) == nullptr)
+        QWidget* page = ui->DevicesTabBar->widget(tab_idx);
+        if(dynamic_cast<OpenRGBPluginContainer*>(page) == nullptr)
         {
-            delete ui->DevicesTabBar->widget(tab_idx);
             ui->DevicesTabBar->removeTab(tab_idx);
+            delete page;
         }
     }
 
-    for(int tab_idx = 0; tab_idx < ui->InformationTabBar->count(); tab_idx++)
+    for(int tab_idx = ui->InformationTabBar->count() - 1; tab_idx >= 0; --tab_idx)
     {
-        if(dynamic_cast<OpenRGBPluginContainer*>(ui->InformationTabBar->widget(tab_idx)) == nullptr)
+        QWidget* page = ui->InformationTabBar->widget(tab_idx);
+        if(dynamic_cast<OpenRGBPluginContainer*>(page) == nullptr)
         {
-            delete ui->InformationTabBar->widget(tab_idx);
             ui->InformationTabBar->removeTab(tab_idx);
+            delete page;
         }
     }
+
+    for(OpenRGBDevicePage* page : hidden_pages)
+    {
+        delete page;
+    }
+    hidden_pages.clear();
 }
 
 void OpenRGBDialog::ShowHideDevicesList()
@@ -1082,6 +1095,9 @@ void OpenRGBDialog::ShowHideDevicesList()
 
 void OpenRGBDialog::UpdateDevicesList()
 {
+    // A previously queued notification must not recreate pages during unload.
+    if(session_closing) return;
+
     std::vector<RGBController *> controllers = ResourceManager::get()->GetRGBControllers();
 
     /*-----------------------------------------------------*\

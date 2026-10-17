@@ -35,7 +35,7 @@ DetectedControllers DetectGoveeBluetoothControllers()
         {"description", "Absolute path to the manually allowlisted BLE devices JSON; never include keys in OpenRGB settings."}};
     schema["keep_black_on_exit"] = {{"type", "bool"}, {"default", false},
         {"title", "Keep black when closing"},
-        {"description", "When the final requested color is black, confirm power OFF instead of restoring the startup snapshot. Other colors retain normal restoration. Never reconnect during shutdown."}};
+        {"description", "When the final requested color is black, confirm power OFF instead of restoring the startup snapshot. An acquired H6159 may reconnect once within the shared shutdown deadline for OFF only. Other colors retain normal restoration."}};
     manager->RegisterSettingsSchemaLocalOnly("GoveeBluetooth", "Govee Bluetooth", schema);
     const json settings = manager->GetSettings("GoveeBluetooth");
     if(!settings.is_object() || !settings.contains("config_file") || !settings["config_file"].is_string() || settings["config_file"] == "")

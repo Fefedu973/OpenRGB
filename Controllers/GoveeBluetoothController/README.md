@@ -198,6 +198,14 @@ the first RGB of every connection, every forced preload before ON, and the
 last sent RGB every 1.5 seconds (including when the color is static). Intermediate
 animation frames do not each add an AA05 request. The periodic check occurs
 before the next color write so an unexpected mode is not hidden by that write.
+A valid AA05 response with a different color is retried once on the same
+connection. A persistent difference becomes `color_unconfirmed`, without
+disconnecting or resending an unchanged ATT-acknowledged color/brightness.
+Subsequent periodic reads can confirm it again. Diagnostics report the expected
+RGB and observed mode, RGB, flag and secondary RGB, at a bounded rate; a white
+flag01 response is not silently accepted as equivalent to normal flag00 RGB.
+Missing replies, invalid checksums and GATT failures retain the transport-error
+path. A pending OFF-to-ON preload still requires matching RGB before ON.
 Black RGB or brightness0 switches the strip OFF only after confirming it was
 ON. Only an OFF owned by this blackout permits automatic resume; its newest
 RGB/brightness is written and checked before switching ON. An independently
@@ -246,6 +254,19 @@ within a shared five-second budget. It does **not** reconnect or power on a
 device merely to restore it. If the radio is unavailable, Windows terminates
 the process, or OpenRGB crashes, restoration is not guaranteed; this limitation
 is reported rather than represented as a successful reset.
+For the explicit `keep_black_on_exit` policy with a final black request, a
+previously acquired H6159 may reconnect **once**, sharing that same five-second
+deadline, to send only OFF and confirm AA01. This does not initialize a color,
+restore a mode, send ON, or change H6008's existing-connection-only exit policy.
+WinRT synchronous object cleanup cannot itself be forcibly time-bounded.
+
+The per-device `control_enabled` option suspends the native worker without
+restoring the startup snapshot or sending color/power commands. It cancels
+in-flight work, closes GATT, discards the session and ignores submitted frames
+while paused. Resume waits for a fresh frame and takes a fresh snapshot. A
+paused device also receives no restoration or OFF command during shutdown.
+These paths have offline regression coverage; the 17 October readback/reconnect
+change has not yet received physical-device validation.
 
 ## Protocol provenance and primary API references
 

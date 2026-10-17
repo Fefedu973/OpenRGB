@@ -15,6 +15,10 @@ struct Fake : Transport
     bool fail_color_readback = false;
     bool drop_color_writes = false;
     bool drop_power_writes = false;
+    bool fail_connect = false;
+    bool stale_reply_after_write = false;
+    bool return_stale_reply = false;
+    Packet stale_mode{};
     uint8_t power = 1, brightness = 151;
     Packet mode;
     unsigned int connects = 0;
@@ -23,7 +27,7 @@ struct Fake : Transport
     explicit Fake(Profile profile) : mode(MakePacket(0xAA, 5,
         {static_cast<uint8_t>(profile == Profile::H6008 ? 13 : 2), 12, 34, 56})) {}
     bool Connected() const override { return connected; }
-    void Connect() override { connected = true; ++connects; }
+    void Connect() override { ++connects; if(fail_connect) throw std::runtime_error("fake connection failure"); connected = true; }
     void Disconnect() noexcept override { connected = false; }
     void Send(const Packet& p) override
     {
@@ -33,6 +37,7 @@ struct Fake : Transport
         else if(p[1] == 5)
         {
             if(drop_color_writes) return;
+            stale_mode = mode;return_stale_reply = stale_reply_after_write;
             mode = p; mode[0] = 0xAA; mode[19] ^= 0x33 ^ 0xAA;
         }
     }
@@ -44,6 +49,7 @@ struct Fake : Transport
         if(command == 5)
         {
             if(fail_color_readback) return MakePacket(0xAA, 5, {5});
+            if(return_stale_reply) { return_stale_reply=false; return stale_mode; }
             return mode;
         }
         throw std::runtime_error("Unexpected fake query");
@@ -234,21 +240,32 @@ int main()
         session.Step({{{1,2,3}},100},0);
         radio.mode=MakePacket(0xAA,5,{2,99,88,77});
         const auto writes=radio.writes.size();
-        Reject([&]{session.Step({{{8,9,10}},100},1500);});
-        assert(radio.writes.size()==writes); // Detect before overwriting the unexpected mode.
-        check("H6159 periodic mismatch detected before a new color write");
+        session.Step({{{1,2,3}},100},1500);
+        assert(radio.writes.size()==writes && radio.connected && radio.connects==1);
+        assert(session.State()=="color_unconfirmed");
+        assert(session.ColorReadbackDiagnostic().find("actual_rgb=99,88,77")!=std::string::npos);
+        for(unsigned i=16;i<60;++i) session.Step({{{1,2,3}},100},i*100);
+        assert(radio.writes.size()==writes && radio.connects==1);
+        check("H6159 valid periodic mismatch preserves link and never resends identical mode/brightness");
     }
     {
         Fake radio(Profile::H6159);radio.drop_color_writes=true;Session session(Profile::H6159,radio);
-        Reject([&]{session.Step({{{1,2,3}},100},0);});
-        check("H6159 first color still requires application-level RGB confirmation");
+        session.Step({{{1,2,3}},100},0);
+        assert(session.State()=="color_unconfirmed" && radio.connected);
+        const auto writes=radio.writes.size();
+        session.Step({{{1,2,3}},100},100);session.Step({{{1,2,3}},100},1600);
+        assert(radio.writes.size()==writes && radio.connects==1);
+        check("H6159 first color remains explicitly unconfirmed without a reconnect/write loop");
     }
     {
         Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
         session.Step({{{0,0,0}},100},0);assert(radio.power==0);
         radio.drop_color_writes=true;
-        Reject([&]{session.Step({{{20,30,40}},60},100);});
+        session.Step({{{20,30,40}},60},100);
         assert(radio.power==0); // Never turn on an unconfirmed preload.
+        const auto writes=radio.writes.size();
+        session.Step({{{20,30,40}},60},200);session.Step({{{20,30,40}},60},1600);
+        assert(radio.power==0 && radio.writes.size()==writes && session.State()=="color_unconfirmed");
         check("H6159 forced blackout resume confirms RGB before switching ON");
     }
     {
@@ -320,6 +337,44 @@ int main()
         assert(radio.writes.size()==count && radio.connects==1);
         assert(session.State()=="black_exit_unconfirmed");
         check("disconnected black exit never reconnects or claims confirmation");
+    }
+    {
+        Fake radio(Profile::H6159);radio.stale_reply_after_write=true;Session session(Profile::H6159,radio);
+        session.Step({{{10,20,30}},90},0);
+        assert(session.State()=="streaming" && radio.connects==1 && radio.writes.size()==2);
+        assert(session.ColorReadbackDiagnostic().empty());
+        assert(std::count(radio.queries.begin(),radio.queries.end(),5)==3);
+        check("one delayed AA05 is retried on the same link without rewriting RGB");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{255,255,255}},100},0);
+        radio.mode=MakePacket(0xAA,5,{2,255,255,255,1,214,225,255});
+        session.Step({{{255,255,255}},100},1500);
+        assert(session.State()=="color_unconfirmed" && radio.connected);
+        assert(session.ColorReadbackDiagnostic().find("flag=1 secondary_rgb=214,225,255")!=std::string::npos);
+        const auto count=radio.writes.size();session.Step({{{255,255,255}},100},3000);
+        assert(radio.writes.size()==count);
+        radio.mode=MakePacket(0xAA,5,{2,255,255,255});
+        session.Step({{{255,255,255}},100},4500);
+        assert(session.State()=="streaming" && session.ColorReadbackDiagnostic().empty());
+        check("white flag01 is diagnosed honestly; normal RGB can recover by readback alone");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{3,4,5}},100},0);radio.Disconnect();const auto count=radio.writes.size();
+        session.Release(true);
+        assert(radio.connects==2 && radio.writes.size()==count+1);
+        assert(radio.writes.back()==MakePacket(0x33,1,{0}) && radio.power==0 && !radio.connected);
+        assert(session.State()=="black_exit_confirmed");
+        check("H6159 disconnected black exit reconnects once for OFF only, never Initialize/color/ON");
+    }
+    {
+        Fake radio(Profile::H6159);Session session(Profile::H6159,radio);
+        session.Step({{{3,4,5}},100},0);radio.Disconnect();radio.fail_connect=true;
+        const auto count=radio.writes.size();Reject([&]{session.Release(true);});
+        assert(radio.connects==2 && radio.writes.size()==count && session.State()=="black_exit_unconfirmed");
+        check("H6159 failed black-exit reconnect is single-attempt with no color or fallback restoration");
     }
     {
         Fake radio(Profile::H6159);Session session(Profile::H6159,radio);

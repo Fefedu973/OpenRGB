@@ -61,3 +61,33 @@ must also be checked on the device. `--self-test` validates descriptor parsing
 offline. Replacing the native compositor DLL requires OpenRGB to exit fully;
 when updating Elgato profiles too, quit OpenRGB before quitting Elgato to allow
 the old background to restore normally.
+
+## Per-light control switch
+
+`Build-DeviceControl.ps1` builds `DeviceControl.exe`, packaged alongside
+ProfileSelect. A shortcut can call:
+
+```text
+DeviceControl.exe --serial "EXACT DEVICE SERIAL" --control toggle
+```
+
+`--control on` and `--control off` set an explicit state. This is an OpenRGB
+ownership switch, not a physical power toggle. Disabling releases the native
+Bluetooth connection without changing the light or restoring an old snapshot.
+External controls can then operate it. Enabling waits for a new effect frame;
+other lights and the selected effect are untouched. The preference persists in
+Configuration.json, including across restarts. A suspended light is excluded
+from the black-on-exit policy.
+
+The helper uses only loopback Room SDK7, requires one exact supported native
+Govee serial and the boolean control schema, and verifies the result. It sends
+1130 for configuration, then 1004 to mark it manual and save it, preserving the
+name, flags, and other options. No resident process or Bluetooth bridge is added.
+A static Stream Deck icon is not a live state indicator; the current state is
+visible in the device's **Control enabled** setting in OpenRGB.
+
+Run `python tools/room-streamdeck/test_device_control.py --exe
+build/room-streamdeck/DeviceControl.exe` for fake-server tests (success,
+missing/duplicate device, malformed/old/rejected response and unapplied state).
+`prepare_control_button.py` stages one button in a free Lights slot, preserving
+all existing actions. `test_control_button.py` verifies that preservation.

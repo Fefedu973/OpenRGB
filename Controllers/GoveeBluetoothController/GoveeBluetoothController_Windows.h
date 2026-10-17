@@ -29,6 +29,8 @@ public:
     ~Controller();
     void Stop(bool requested_black = false);
     void Submit(Frame frame);
+    void SetControlEnabled(bool enabled);
+    bool ControlEnabled() const { return control_enabled.load(); }
     std::string Name() const { return configuration.name; }
     std::string Serial() const { return configuration.serial; }
     std::string Model() const { return configuration.profile == Profile::H6008 ? "H6008" : "H6159"; }
@@ -39,7 +41,10 @@ private:
     std::condition_variable wake;
     std::thread worker;
     std::atomic<bool> stopping{false};
+    std::atomic<bool> control_enabled{true};
+    std::atomic<bool> operation_cancelled{false};
     std::atomic<bool> final_black{false};
+    uint64_t control_generation = 0; // Protected by mutex, invalidates in-flight work on every toggle.
     Frame latest{};
     bool have_frame = false;
 };

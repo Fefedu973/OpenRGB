@@ -647,16 +647,37 @@ void Controller::Stop(bool requested_black)
     if(!worker.joinable()) return;
     // The RGB controller supplies its final colors after joining its producer,
     // including a black exit color not yet consumed by this BLE worker.
-    final_black = configuration.keep_black_on_exit && requested_black;
-    stopping = true;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        final_black = configuration.keep_black_on_exit && requested_black && control_enabled.load();
+        stopping = true;
+        operation_cancelled = true;
+    }
     wake.notify_all();
     worker.join();
 }
 void Controller::Submit(Frame frame)
 {
     if(frame.brightness > 100) frame.brightness = 100;
-    { std::lock_guard<std::mutex> lock(mutex); latest = frame; have_frame = true; }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if(stopping || !control_enabled) return;
+        latest = frame; have_frame = true;
+    }
     wake.notify_one();
+}
+
+void Controller::SetControlEnabled(bool enabled)
+{
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if(stopping || control_enabled.load() == enabled) return;
+        control_enabled = enabled;
+        ++control_generation;
+        have_frame = false; // Neither a suspended frame nor an old frame can resume control.
+        operation_cancelled = true;
+    }
+    wake.notify_all();
 }
 
 void Controller::Run()
@@ -676,49 +697,82 @@ void Controller::Run()
         return;
     }
     {
-        WindowsTransport transport(configuration, stopping);
-        Session session(configuration.profile, transport, configuration.PowerOnAcquire());
+        WindowsTransport transport(configuration, operation_cancelled);
+        auto session = std::make_unique<Session>(configuration.profile, transport, configuration.PowerOnAcquire());
+        uint64_t worker_generation = 0;
         unsigned int failures = 0;
         auto next_step = Clock::now();
+        auto last_color_warning = Clock::time_point::min();
         std::string previous_state;
         while(!stopping)
         {
             Frame frame;
             {
                 std::unique_lock<std::mutex> lock(mutex);
-                if(!have_frame) wake.wait_for(lock, 100ms, [this] { return stopping || have_frame; });
                 if(stopping) break;
+                if(worker_generation != control_generation)
+                {
+                    // Pause/resume invalidates both an in-flight operation and
+                    // its restoration snapshot. Disconnect is deliberately not
+                    // Session::Release: leave physical power/color untouched.
+                    lock.unlock();
+                    transport.Disconnect();
+                    session.reset();
+                    lock.lock();
+                    worker_generation = control_generation;
+                    failures = 0;
+                    next_step = Clock::now();
+                    previous_state.clear();
+                    if(!stopping && control_enabled) operation_cancelled = false;
+                }
+                if(!control_enabled || !have_frame)
+                    wake.wait_for(lock, 100ms, [this, worker_generation] {
+                        return stopping || control_generation != worker_generation || (control_enabled && have_frame);
+                    });
+                if(stopping) break;
+                if(worker_generation != control_generation || !control_enabled) continue;
                 if(!have_frame) continue;
                 if(Clock::now() < next_step)
                 {
                     // New frame notifications do not bypass the hardware cadence.
-                    wake.wait_until(lock, next_step, [this] { return stopping.load(); });
+                    wake.wait_until(lock, next_step, [this, worker_generation] {
+                        return stopping.load() || control_generation != worker_generation;
+                    });
                     if(stopping) break;
+                    if(worker_generation != control_generation) continue;
                 }
                 frame = latest;
             }
             try
             {
                 const auto now = Clock::now();
-                session.Step(frame, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()));
+                if(!session) session = std::make_unique<Session>(configuration.profile, transport, configuration.PowerOnAcquire());
+                session->Step(frame, static_cast<uint64_t>(std::chrono::duration_cast<std::chrono::milliseconds>(now.time_since_epoch()).count()));
                 failures = 0;
-                if(previous_state != session.State())
+                if(session->State() == "color_unconfirmed" &&
+                    (previous_state != session->State() || now - last_color_warning >= 30s))
                 {
-                    previous_state = session.State();
+                    LOG_WARNING("[Govee BLE] %s: color unconfirmed on live connection; %s",
+                        configuration.name.c_str(), session->ColorReadbackDiagnostic().c_str());
+                    last_color_warning = now;
+                }
+                if(previous_state != session->State())
+                {
+                    previous_state = session->State();
                     LOG_INFO("[Govee BLE] %s: %s%s", configuration.name.c_str(), previous_state.c_str(),
-                        session.RecoveredBaseline() ? " (new requested RGB recovery baseline)" : "");
+                        session->RecoveredBaseline() ? " (new requested RGB recovery baseline)" : "");
                 }
                 next_step = Clock::now() + (configuration.profile == Profile::H6008 ? 50ms : 100ms);
             }
             catch(const std::exception& error)
             {
-                if(!stopping) LOG_WARNING("[Govee BLE] %s: %s", configuration.name.c_str(), error.what());
+                if(!stopping && !operation_cancelled) LOG_WARNING("[Govee BLE] %s: %s", configuration.name.c_str(), error.what());
                 if(!stopping) transport.Disconnect();
                 next_step = Clock::now() + (++failures >= 3 ? 30s : 1s);
             }
             catch(const winrt::hresult_error& error)
             {
-                if(!stopping) LOG_WARNING("[Govee BLE] %s: Windows GATT error 0x%08X", configuration.name.c_str(), static_cast<unsigned int>(error.code().value));
+                if(!stopping && !operation_cancelled) LOG_WARNING("[Govee BLE] %s: Windows GATT error 0x%08X", configuration.name.c_str(), static_cast<unsigned int>(error.code().value));
                 if(!stopping) transport.Disconnect();
                 next_step = Clock::now() + (++failures >= 3 ? 30s : 1s);
             }
@@ -728,19 +782,31 @@ void Controller::Run()
                 break;
             }
         }
-        transport.BeginRestore();
-        try
+        // Stop freezes control_enabled under mutex. A paused device, including
+        // a toggle not yet consumed by this worker, must never be restored/OFF.
+        bool release_owned_session;
         {
-            session.Release(final_black.load());
-            if(final_black && session.State() != "black_exit_confirmed")
-                LOG_WARNING("[Govee BLE] Black exit could not be confirmed on the existing session; no reconnect attempted");
-            else if(final_black)
-                LOG_INFO("[Govee BLE] %s: black exit confirmed (power OFF readback)", configuration.name.c_str());
+            std::lock_guard<std::mutex> lock(mutex);
+            release_owned_session = control_enabled && worker_generation == control_generation && session;
+            stopping = true; // Also freeze toggles after an unexpected worker failure.
+            operation_cancelled = true;
         }
-        catch(...)
+        if(release_owned_session)
         {
-            LOG_WARNING("[Govee BLE] Shutdown %s could not be completed; no reconnect attempted",
-                final_black ? "blackout" : "restoration");
+            transport.BeginRestore();
+            try
+            {
+                session->Release(final_black.load());
+                if(final_black && session->State() != "black_exit_confirmed")
+                    LOG_WARNING("[Govee BLE] %s: black exit could not be confirmed within the shutdown policy", configuration.name.c_str());
+                else if(final_black)
+                    LOG_INFO("[Govee BLE] %s: black exit confirmed (power OFF readback)", configuration.name.c_str());
+            }
+            catch(...)
+            {
+                LOG_WARNING("[Govee BLE] %s: shutdown %s could not be confirmed within the shared deadline",
+                    configuration.name.c_str(), final_black ? "blackout" : "restoration");
+            }
         }
         transport.Disconnect();
     }

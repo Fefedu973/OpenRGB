@@ -15,11 +15,13 @@ public:
     void Release(bool keep_black = false);
     std::string State() const { return state; }
     bool RecoveredBaseline() const { return recovered_baseline; }
+    const std::string& ColorReadbackDiagnostic() const { return color_diagnostic; }
 private:
     void Initialize(const Frame& frame, uint64_t now_ms);
     void ObservePower(uint8_t current);
     void SetPower(bool on);
-    void SendClassicColor(const Frame& frame, bool force, uint64_t now_ms);
+    bool ConfirmClassicColor(RGB expected, uint64_t now_ms);
+    bool SendClassicColor(const Frame& frame, bool force, uint64_t now_ms, bool require_current = false);
     void SendRealtimeColor(const Frame& frame, bool force);
     Profile profile;
     Transport& transport;
@@ -35,6 +37,9 @@ private:
     bool acquire_power_owned = false;
     bool external_off = false;
     bool sent = false;
+    bool color_confirmed = false;
+    bool resume_preloaded = false;
+    std::string color_diagnostic;
     uint8_t power = 0;
     uint8_t original_power = 0;
     uint8_t original_brightness = 0;

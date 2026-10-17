@@ -9,11 +9,14 @@ public:
     explicit RGBController_GoveeBluetooth(GoveeBluetooth::Configuration configuration);
     ~RGBController_GoveeBluetooth();
     void SetupZones();
+    void DeviceConfigureDevice() override;
+    void DeviceUpdateDeviceSpecificConfiguration() override;
     void DeviceConfigureZone(int zone_idx) override;
     void DeviceUpdateLEDs() override;
     void DeviceUpdateZoneLEDs(int zone_idx) override;
     void DeviceUpdateSingleLED(int led_idx) override;
     void DeviceUpdateMode() override;
 private:
+    void InitDeviceSpecificConfiguration();
     GoveeBluetooth::Controller controller;
 };

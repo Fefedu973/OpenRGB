@@ -74,6 +74,9 @@ try {
         $profileHelperBuild=Join-Path $repo 'build\room-streamdeck'
         Copy-Item -LiteralPath (Join-Path $profileHelperBuild 'ProfileSelect.exe') -Destination $dist
         Copy-Item -LiteralPath (Join-Path $profileHelperBuild 'ProfileSelect-BUILD-INFO.json') -Destination $dist
+        & (Join-Path $repo 'tools\room-streamdeck\Build-DeviceControl.ps1')
+        Copy-Item -LiteralPath (Join-Path $profileHelperBuild 'DeviceControl.exe') -Destination $dist
+        Copy-Item -LiteralPath (Join-Path $profileHelperBuild 'DeviceControl-BUILD-INFO.json') -Destination $dist
         Copy-Item -LiteralPath (Join-Path $repo 'build\release\OpenRGB.exe') -Destination $dist
         # Non-Qt runtime dependencies are supplied by the OpenRGB build itself.
         Get-ChildItem -LiteralPath (Join-Path $repo 'build\release') -File | Where-Object {
@@ -124,6 +127,8 @@ try {
         $manifest.coreWorkingTreeDirty=[bool](& git -C $repo status --porcelain --untracked-files=normal)
         $manifest.profileSelectBinarySha256=Get-BinaryHash (Join-Path $dist 'ProfileSelect.exe')
         $manifest.profileSelectSourceSha256=Get-BinaryHash (Join-Path $repo 'tools\room-streamdeck\ProfileSelect.cpp')
+        $manifest.deviceControlBinarySha256=Get-BinaryHash (Join-Path $dist 'DeviceControl.exe')
+        $manifest.deviceControlSourceSha256=Get-BinaryHash (Join-Path $repo 'tools\room-streamdeck\DeviceControl.cpp')
         $manifest.nativeStreamDeckIncluded=$withNativeStreamDeck
         if ($withNativeStreamDeck) {
             $manifest.nativeStreamDeckBinarySha256=Get-BinaryHash (Join-Path $dist 'RoomStreamDeckNative.dll')

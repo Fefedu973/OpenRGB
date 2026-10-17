@@ -34,6 +34,7 @@ RGBController_GoveeBluetooth::RGBController_GoveeBluetooth(GoveeBluetooth::Confi
     stat.colors.resize(1);
     modes.push_back(stat);
     SetupZones();
+    InitDeviceSpecificConfiguration();
 }
 
 RGBController_GoveeBluetooth::~RGBController_GoveeBluetooth()
@@ -42,7 +43,7 @@ RGBController_GoveeBluetooth::~RGBController_GoveeBluetooth()
     // Shutdown joined the core producer and holds AccessMutex. Read the actual
     // final buffer, not the BLE worker's possibly older last-delivered frame.
     bool requested_black = false;
-    if(!colors.empty() && active_mode < modes.size())
+    if(controller.ControlEnabled() && !colors.empty() && active_mode < modes.size())
     {
         const mode& current = modes[active_mode];
         const RGBColor color = current.value == 1 && !current.colors.empty() ? current.colors[0] : colors[0];
@@ -50,6 +51,47 @@ RGBController_GoveeBluetooth::~RGBController_GoveeBluetooth()
             (RGBGetRValue(color) == 0 && RGBGetGValue(color) == 0 && RGBGetBValue(color) == 0);
     }
     controller.Stop(requested_black);
+}
+
+void RGBController_GoveeBluetooth::InitDeviceSpecificConfiguration()
+{
+    nlohmann::json config;
+    config["schema"]["control_enabled"] = {
+        {"title", "Control enabled"},
+        {"type", "bool"},
+        {"description", "Allow OpenRGB to control this light. Disabling disconnects Bluetooth without changing the light; enabling waits for a new color."}
+    };
+    config["configuration"]["control_enabled"] = true;
+    configuration = config.dump();
+    flags |= CONTROLLER_FLAG_MANUALLY_CONFIGURABLE_DEVICE_SPECIFIC;
+}
+
+void RGBController_GoveeBluetooth::DeviceConfigureDevice()
+{
+    if((flags & CONTROLLER_FLAG_MANUALLY_CONFIGURED_DEVICE_SPECIFIC) == 0)
+    {
+        InitDeviceSpecificConfiguration();
+        controller.SetControlEnabled(true);
+    }
+}
+
+void RGBController_GoveeBluetooth::DeviceUpdateDeviceSpecificConfiguration()
+{
+    // The base setter holds AccessMutex: do not call its locking getter here.
+    auto config = nlohmann::json::parse(configuration, nullptr, false);
+    bool enabled = controller.ControlEnabled();
+    if(config.is_object() && config.contains("configuration") &&
+       config["configuration"].is_object())
+    {
+        auto& values = config["configuration"];
+        if(values.contains("control_enabled") && values["control_enabled"].is_boolean())
+            enabled = values["control_enabled"].get<bool>();
+        // The generic setter validates schema keys, not value types. Retain the
+        // previous state for malformed SDK values and expose the effective bool.
+        values["control_enabled"] = enabled;
+        configuration = config.dump();
+    }
+    controller.SetControlEnabled(enabled);
 }
 
 void RGBController_GoveeBluetooth::SetupZones()

@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "GoveeBluetoothSession.h"
 #include <stdexcept>
+#include <sstream>
 
 namespace GoveeBluetooth
 {
@@ -77,16 +78,13 @@ void Session::Initialize(const Frame& frame, uint64_t now_ms)
 
     realtime_started = false;
     sent = false;
+    color_confirmed = false;
+    resume_preloaded = false;
+    color_diagnostic.clear();
     if(!acquired && profile == Profile::H6008 && power_on_acquire && power == 0)
         acquire_on_pending = true;
-    bool black = frame.rgb == RGB{{0, 0, 0}} || frame.brightness == 0;
-    if(!acquired && profile == Profile::H6159 && power_on_acquire && black && power == 0)
-        blackout_owned = true; // Explicit first-acquisition ON is deferred until RGB becomes nonzero.
-    if(!acquired && profile == Profile::H6159 && power_on_acquire && !black && power == 0)
-    {
-        SendClassicColor(frame, true, now_ms);
-        SetPower(true);
-    }
+    if(!acquired && profile == Profile::H6159 && power_on_acquire && power == 0)
+        blackout_owned = true; // ON waits for a nonzero, confirmed preload in Step.
     acquired = true;
     state = "ready";
 }
@@ -108,16 +106,35 @@ void Session::SendRealtimeColor(const Frame& frame, bool force)
     }
 }
 
-void Session::SendClassicColor(const Frame& frame, bool force, uint64_t now_ms)
+bool Session::ConfirmClassicColor(RGB expected, uint64_t now_ms)
 {
-    const bool confirm_current = force || !sent;
+    Packet reply = transport.Query(5);
+    // A valid but different reply is not a dead radio. One fresh read on the
+    // same link can resolve a delayed mode notification, without another write.
+    if(!MatchesColor(profile, reply, expected)) reply = transport.Query(5);
+    last_color_check_ms = now_ms;
+    color_confirmed = MatchesColor(profile, reply, expected);
+    if(color_confirmed) color_diagnostic.clear();
+    else
+    {
+        std::ostringstream out;
+        out << "expected_rgb=" << unsigned(expected[0]) << ',' << unsigned(expected[1]) << ',' << unsigned(expected[2])
+            << " actual_mode=" << unsigned(reply[2]) << " actual_rgb=" << unsigned(reply[3]) << ',' << unsigned(reply[4]) << ',' << unsigned(reply[5])
+            << " flag=" << unsigned(reply[6]) << " secondary_rgb=" << unsigned(reply[7]) << ',' << unsigned(reply[8]) << ',' << unsigned(reply[9])
+            << " restorable=" << RestorableMode(profile, reply);
+        color_diagnostic = out.str(); // Fixed-size color fields only; no identity, key or arbitrary payload.
+    }
+    return color_confirmed;
+}
+
+bool Session::SendClassicColor(const Frame& frame, bool force, uint64_t now_ms, bool require_current)
+{
+    const bool confirm_current = force || !sent || (require_current && frame.rgb != last_frame.rgb);
     if(!confirm_current && now_ms - last_color_check_ms >= 1500u)
     {
         // Check the last delivered color before overwriting it. This also runs
         // for a static frame, detecting an externally changed/ignored mode.
-        if(!MatchesColor(profile, transport.Query(5), last_frame.rgb))
-            throw std::runtime_error("H6159 periodic RGB readback mismatch");
-        last_color_check_ms = now_ms;
+        ConfirmClassicColor(last_frame.rgb, now_ms);
     }
     if(force || !sent || frame.brightness != last_frame.brightness)
     {
@@ -132,14 +149,12 @@ void Session::SendClassicColor(const Frame& frame, bool force, uint64_t now_ms)
     // ATT WriteWithResponse acknowledges each write. Keep an application-mode
     // readback on the first color of every connection and before any forced
     // power-on preload, rather than serializing a status exchange per frame.
-    if(confirm_current)
-    {
-        if(!MatchesColor(profile, transport.Query(5), frame.rgb))
-            throw std::runtime_error("H6159 RGB readback mismatch");
-        last_color_check_ms = now_ms;
-    }
+    // Remember ATT-acknowledged writes even if the application reply differs.
+    // An unchanged frame must not repeatedly reset the firmware's color mode.
     last_frame = frame;
     sent = true;
+    if(confirm_current) ConfirmClassicColor(frame.rgb, now_ms);
+    return color_confirmed;
 }
 
 void Session::Step(const Frame& frame, uint64_t now_ms)
@@ -168,6 +183,7 @@ void Session::Step(const Frame& frame, uint64_t now_ms)
         bool black = frame.rgb == RGB{{0, 0, 0}} || frame.brightness == 0;
         if(black)
         {
+            resume_preloaded = false;
             if(!blackout_owned)
             {
                 ObservePower(transport.Query(1)[2]);
@@ -180,7 +196,9 @@ void Session::Step(const Frame& frame, uint64_t now_ms)
         }
         if(blackout_owned)
         {
-            SendClassicColor(frame, true, now_ms); // Preload color/level while OFF, avoid stale white flash.
+            const bool confirmed = SendClassicColor(frame, !resume_preloaded, now_ms, true);
+            resume_preloaded = true;
+            if(!confirmed) { state = "color_unconfirmed"; return; }
             SetPower(true);
             blackout_owned = false;
             external_off = false;
@@ -199,7 +217,7 @@ void Session::Step(const Frame& frame, uint64_t now_ms)
     {
         SendRealtimeColor(frame, false);
     }
-    else SendClassicColor(frame, false, now_ms);
+    else if(!SendClassicColor(frame, false, now_ms)) { state = "color_unconfirmed"; return; }
     state = "streaming";
 }
 
@@ -208,10 +226,12 @@ void Session::Release(bool keep_black)
     state = "releasing";
     if(keep_black)
     {
-        // Explicit exit policy supersedes the startup snapshot. Do not acquire
-        // or reconnect a light while shutting down, or restore it ON on failure.
+        // Explicit exit policy supersedes the startup snapshot. A previously
+        // acquired H6159 gets at most one reconnect within the transport's
+        // shared shutdown deadline. Never Initialize, restore color, or send ON.
         state = "black_exit_unconfirmed";
-        if(acquired && transport.Connected())
+        if((acquired || modified) && profile == Profile::H6159 && !transport.Connected()) transport.Connect();
+        if((acquired || modified) && transport.Connected())
         {
             SetPower(false); // ATT acknowledgement plus AA01 application readback.
             state = "black_exit_confirmed";

@@ -97,6 +97,7 @@ private:
     std::chrono::steady_clock::time_point image_deadline{};
     std::uint64_t led_generation = 0, image_generation = 0;
     Status status;
+    std::string last_reported_error; // Independent of cached transport/status publication.
     bool stopping = false;
     std::thread worker;
 };

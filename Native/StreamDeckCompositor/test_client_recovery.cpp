@@ -1,9 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 #include "../../Controllers/StreamDeckBackgroundController/StreamDeckNativeClient.h"
+#include "../../Controllers/StreamDeckBackgroundController/StreamDeckBackgroundController.h"
+#include "RoomStreamDeckNative.h"
+#include <atomic>
 #include <windows.h>
 #include <filesystem>
 #include <iostream>
 #include <stdexcept>
+#include <thread>
 using Client=streamdeck_background::NativeClient;
 using namespace std::chrono_literals;
 static unsigned checks=0;
@@ -21,7 +25,8 @@ int main(int argc,char** argv)
   const auto pid=reinterpret_cast<void(*)(unsigned)>(GetProcAddress(dll,"fixture_pid"));
   const auto stalled=reinterpret_cast<void(*)(int)>(GetProcAddress(dll,"fixture_stalled"));
   const auto bad_close=reinterpret_cast<void(*)(int)>(GetProcAddress(dll,"fixture_close_failure"));
-  Check(reset&&fail&&count&&pid&&stalled&&bad_close,"fixture exports");
+  const auto open_fail=reinterpret_cast<void(*)(int,int)>(GetProcAddress(dll,"fixture_open_failure"));
+  Check(reset&&fail&&count&&pid&&stalled&&bad_close&&open_fail,"fixture exports");
   Client::Clock::time_point now(100s);
   const auto clock=[&]{return now;};
   reset();
@@ -119,6 +124,69 @@ int main(int argc,char** argv)
    Client client(path,"C:/synthetic",20,clock);client.Request("/health","");bad_close(1);
    Check(!client.Close().empty(),"cleanup failure is retained");
    Failure([&]{client.Request("/health","");});Check(count(0)==1,"ambiguous cleanup cannot reattach same PID");
+  }
+  // Only the typed ABI result certifying cleanup allows another initial open.
+  reset();
+  {
+   Client client(path,"C:/synthetic",20,clock);open_fail(ROOM_SD_RETRY_OPEN,6);
+   unsigned attempts=0;
+   for(const auto delay:{1,2,4,8,10,10})
+   {
+    const auto reason=Failure([&]{client.Request("/health","");});++attempts;
+    const auto status=client.LastDiagnostics();
+    Check(status["transportState"]=="recovering"&&status["retryKind"]=="open"&&status["openAttempts"]==attempts,"open retry has distinct diagnostics");
+    Check(status["sampledSteadyMs"].is_null()&&!status["lastKnownReady"].get<bool>()&&status["retryAfterMs"]==delay*1000,"open retry never invents health and caps its delay");
+    now+=500ms;
+    Check(Failure([&]{client.Request("/health","");})==reason,"deadline wait keeps the same logged cause");
+    Check(count(9)==static_cast<int>(attempts)&&count(0)==0&&count(2)==0&&count(5)==0,"no open or health before retry deadline");
+    now+=std::chrono::milliseconds(delay*1000-500);
+   }
+   const auto status=client.Request("/health","");
+   Check(status["ready"]==true&&status["retryKind"]=="none"&&status["openAttempts"]==7,"same PID opens after confirmed-cleanup retries");
+   Check(count(9)==7&&count(0)==1&&count(2)==1&&count(3)==0,"retry success creates only one live handle without a frame replay");
+  }
+  // A new process bypasses only the old process's backoff, with no cached sample.
+  reset();
+  {
+   Client client(path,"C:/synthetic",20,clock);client.Request("/health","");
+   fail(3,1,0);Failure([&]{client.Request("/frame","old");});
+   pid(11);open_fail(ROOM_SD_RETRY_OPEN,3);
+   Failure([&]{client.Request("/health","");});
+   auto status=client.LastDiagnostics();
+   Check(status["sampledSteadyMs"].is_null()&&status["ageMs"].is_null()&&!status["lastKnownReady"].get<bool>()&&!status.contains("errors"),"new PID cannot retain previous health or fault counters");
+   now+=1s;Failure([&]{client.Request("/health","");});
+   Check(client.LastDiagnostics()["retryAfterMs"]==2000,"second same-PID retry backs off");
+   pid(12);Failure([&]{client.Request("/health","");});
+   status=client.LastDiagnostics();
+   Check(status["openAttempts"]==1&&status["retryAfterMs"]==1000,"new PID resets pending open backoff immediately");
+   now+=1s;Check(client.Request("/health","").value("ready",false),"new PID recovers after its own deadline");
+  }
+  for(int code:{ROOM_SD_GUARD,ROOM_SD_ATTACH,ROOM_SD_RPC})
+  {
+   reset();Client client(path,"C:/synthetic",20,clock);open_fail(code,1);
+   Failure([&]{client.Request("/health","");});now+=30s;
+   Failure([&]{client.Request("/health","");});
+   Check(count(9)==1&&count(2)==0&&client.LastDiagnostics()["transportState"]=="faulted","cancelled text alone never retries guard or ambiguous attachment failure");
+   pid(11);Check(client.Request("/health","").value("ready",false),"a different PID is allowed after a true initial fault");
+  }
+  // Real worker + fake ABI: SDK's more detailed cause must not defeat log dedup.
+  // Configure fixture only before starting, and inspect its counters after join.
+  reset();open_fail(ROOM_SD_ATTACH,1);
+  {
+   streamdeck_background::Options options;options.transport="native";options.native_library=path;options.native_lock_directory="C:/synthetic";
+   std::atomic<unsigned> reports{0};
+   streamdeck_background::Controller controller(options,[&](const std::string&){++reports;});
+   controller.Submit(std::vector<unsigned char>(streamdeck_background::LED_COUNT*3,127));
+   const auto deadline=Client::Clock::now()+6s;
+   streamdeck_background::Status status;
+   do {
+    status=controller.GetStatus();
+    if(status.failures>=4&&status.state=="faulted")break;
+    std::this_thread::sleep_for(5ms);
+   }while(Client::Clock::now()<deadline);
+   controller.Stop();
+   Check(status.failures>=4&&status.state=="faulted","real controller ran repeated fatal-PID checks");
+   Check(reports.load()==2&&count(9)==1,"initial error and latched cause logged once each despite status rewrites");
   }
   Check(count(2)==0,"final handle closed");FreeLibrary(dll);
   std::cout<<"PASS "<<checks<<" native-client recovery checks; fake ABI and clock only, no target process\n";return 0;

@@ -39,6 +39,45 @@ inline void ThrowError(GError* error,const char* fallback)
     if(!error)return;const std::string message=error->message?error->message:fallback;
     g_error_free(error);throw std::runtime_error(message);
 }
+struct OpenFailure:std::runtime_error {
+    bool cancelled;
+    OpenFailure(const std::string& phase,unsigned pid,long long elapsed,unsigned deadline,
+                bool was_cancelled,const std::string& domain,int code,const std::string& message)
+        :std::runtime_error("Native compositor open phase="+phase+" pid="+std::to_string(pid)
+            +" elapsed_ms="+std::to_string(elapsed)+" deadline_ms="+std::to_string(deadline)
+            +" cancelled="+(was_cancelled?"true":"false")+" domain="+domain
+            +" code="+std::to_string(code)+": "+message),cancelled(was_cancelled){}
+};
+inline void CheckOpenError(GError* error,const char* phase,unsigned pid,Clock::time_point started,unsigned deadline)
+{
+    if(!error)return;
+    const bool cancelled=g_error_matches(error,G_IO_ERROR,G_IO_ERROR_CANCELLED)!=FALSE;
+    const char* domain=g_quark_to_string(error->domain);
+    OpenFailure failure(phase,pid,std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now()-started).count(),
+                        deadline,cancelled,domain?domain:"unknown",error->code,error->message?error->message:"Initialization failed");
+    g_error_free(error);throw failure;
+}
+struct OpenTimeouts {
+    // Loading a newly started Elgato process can require more than the normal
+    // RPC budget. This changes initialization only, not frame/cleanup latency.
+    unsigned get_device=2000,attach=5000,create_script=2000,load_script=5000;
+};
+struct CleanupResult {
+    bool ok=true,had_session=false,had_script=false,load_attempted=false;
+    bool session_detached=false,manager_closed=false;
+    bool AllowsRetry(const OpenFailure& failure)const {
+        // A cancelled attach may return no session, but our code has not yet
+        // created any script. Once a session exists, detachment must be proven.
+        return failure.cancelled && ok && manager_closed
+            && (had_session?session_detached:(!had_script&&!load_attempted));
+    }
+    std::string Summary()const {
+        return std::string(" cleanup_ok=")+(ok?"true":"false")
+            +" load_attempted="+(load_attempted?"true":"false")
+            +" detach_confirmed="+(session_detached?"true":"false")
+            +" manager_closed="+(manager_closed?"true":"false");
+    }
+};
 class Engine {
     static std::mutex& Ownership(){static std::mutex value;return value;}
     std::unique_lock<std::mutex> ownership;
@@ -49,7 +88,7 @@ class Engine {
     std::thread::id owner=std::this_thread::get_id();
     std::uint64_t next_id=0;
     unsigned target_pid=0;
-    bool loaded=false;
+    bool loaded=false,load_attempted=false;
     std::atomic<bool> detached{false};
     RpcResponse response;
     static void Message(FridaScript*,const gchar* text,GBytes*,gpointer self)
@@ -72,29 +111,37 @@ public:
     ~Engine(){Close();g_main_context_unref(context);}
     void CheckThread()const
     {if(std::this_thread::get_id()!=owner)throw std::runtime_error("Native compositor handle used from another thread");}
-    void Open(unsigned pid,const std::string& source)
+    void Open(unsigned pid,const std::string& source,const OpenTimeouts& timeouts={})
     {
         CheckThread();target_pid=pid;GError* error=nullptr;
         ROOM_SD_TRACE("manager");
         manager=frida_device_manager_new();
         ROOM_SD_TRACE("get device");
-        {Cancellation timeout;device=frida_device_manager_get_device_by_type_sync(manager,FRIDA_DEVICE_TYPE_LOCAL,1000,timeout,&error);}
-        ThrowError(error,"Local Frida device unavailable");if(!device)throw std::runtime_error("Local Frida device unavailable");
+        auto started=Clock::now();
+        {Cancellation timeout(timeouts.get_device);device=frida_device_manager_get_device_by_type_sync(manager,FRIDA_DEVICE_TYPE_LOCAL,1000,timeout,&error);}
+        CheckOpenError(error,"get-device",pid,started,timeouts.get_device);if(!device)throw std::runtime_error("Native compositor open phase=get-device: Local Frida device unavailable");
         ROOM_SD_TRACE("attach");
-        {Cancellation timeout;session=frida_device_attach_sync(device,pid,nullptr,timeout,&error);}
-        ThrowError(error,"Attachment failed");if(!session)throw std::runtime_error("Attachment failed");
+        started=Clock::now();
+        auto* session_options=frida_session_options_new();
+        // A broken connection must not preserve an orphan script remotely.
+        frida_session_options_set_persist_timeout(session_options,0);
+        {Cancellation timeout(timeouts.attach);session=frida_device_attach_sync(device,pid,session_options,timeout,&error);}
+        g_object_unref(session_options);
+        CheckOpenError(error,"attach",pid,started,timeouts.attach);if(!session)throw std::runtime_error("Native compositor open phase=attach: Attachment failed");
         ROOM_SD_TRACE("create script");
         detach_handler=g_signal_connect(session,"detached",G_CALLBACK(Detached),this);
         auto* options=frida_script_options_new();
         frida_script_options_set_name(options,"openrgb-room-guarded-background");
         frida_script_options_set_runtime(options,FRIDA_SCRIPT_RUNTIME_QJS);
-        {Cancellation timeout;script=frida_session_create_script_sync(session,source.c_str(),options,timeout,&error);}
-        g_object_unref(options);ThrowError(error,"Script creation failed");
+        started=Clock::now();
+        {Cancellation timeout(timeouts.create_script);script=frida_session_create_script_sync(session,source.c_str(),options,timeout,&error);}
+        g_object_unref(options);CheckOpenError(error,"create-script",pid,started,timeouts.create_script);
         if(!script)throw std::runtime_error("Script creation failed");
         ROOM_SD_TRACE("load script");
         message_handler=g_signal_connect(script,"message",G_CALLBACK(Message),this);
-        {Cancellation timeout;frida_script_load_sync(script,timeout,&error);}
-        ThrowError(error,"Script loading failed");loaded=true;Pump();
+        started=Clock::now();load_attempted=true;
+        {Cancellation timeout(timeouts.load_script);frida_script_load_sync(script,timeout,&error);}
+        CheckOpenError(error,"load-script",pid,started,timeouts.load_script);loaded=true;Pump();
         ROOM_SD_TRACE("loaded");
         const auto fault=response.Read().fault;
         if(!fault.empty())throw std::runtime_error(fault);
@@ -153,29 +200,37 @@ public:
         }catch(const std::exception& e){detail=e.what();}
         return false;
     }
-    bool Close(std::string* detail=nullptr)noexcept
+    bool Close(std::string* detail=nullptr,CleanupResult* outcome=nullptr)noexcept
     {
         ROOM_SD_TRACE("close");
-        bool ok=true;
-        const auto note=[&](GError* error) {
-            if(error) {ok=false;if(detail && detail->empty())*detail=error->message?error->message:"Frida cleanup failed";g_error_free(error);}
+        CleanupResult result;result.had_session=session!=nullptr;result.had_script=script!=nullptr;result.load_attempted=load_attempted;
+        const auto note=[&](GError* error,const char* phase) {
+            if(error) {result.ok=false;if(detail && detail->empty())*detail=std::string(phase)+": "+(error->message?error->message:"Frida cleanup failed");g_error_free(error);}
         };
         // Bound each Frida operation; callbacks are disconnected before userdata dies.
         if(script) {
             if(message_handler)g_signal_handler_disconnect(script,message_handler);
             message_handler=0;
-            if(loaded && !detached){GError* error=nullptr;Cancellation timeout;frida_script_unload_sync(script,timeout,&error);note(error);}
-            g_object_unref(script);script=nullptr;loaded=false;
+            if(load_attempted && !detached && !frida_script_is_destroyed(script)){GError* error=nullptr;Cancellation timeout;frida_script_unload_sync(script,timeout,&error);note(error,"unload");}
+            g_object_unref(script);script=nullptr;loaded=false;load_attempted=false;
         }
         if(session) {
             if(detach_handler)g_signal_handler_disconnect(session,detach_handler);
             detach_handler=0;
-            if(!detached){GError* error=nullptr;Cancellation timeout;frida_session_detach_sync(session,timeout,&error);note(error);}
+            // Frida sets its local detached flag before remote release finishes.
+            // An already-set flag is not sufficient evidence for retrying open.
+            if(!frida_session_is_detached(session)){
+                GError* error=nullptr;Cancellation timeout;frida_session_detach_sync(session,timeout,&error);
+                result.session_detached=error==nullptr && frida_session_is_detached(session)!=FALSE;
+                note(error,"detach");
+                if(!result.session_detached){result.ok=false;if(detail && detail->empty())*detail="Session detachment not confirmed";}
+            }
             g_object_unref(session);session=nullptr;
         }
         if(device){g_object_unref(device);device=nullptr;}
-        if(manager){GError* error=nullptr;Cancellation timeout;frida_device_manager_close_sync(manager,timeout,&error);note(error);g_object_unref(manager);manager=nullptr;}
-        return ok;
+        if(manager){GError* error=nullptr;Cancellation timeout;frida_device_manager_close_sync(manager,timeout,&error);result.manager_closed=error==nullptr;note(error,"manager-close");g_object_unref(manager);manager=nullptr;}
+        if(outcome)*outcome=result;
+        return result.ok;
     }
 };
 }

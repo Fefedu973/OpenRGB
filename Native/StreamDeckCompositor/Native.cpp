@@ -19,6 +19,7 @@ int room_sd_open(uint32_t pid,const char* directory,uint32_t fps,void** output,c
     if(output)*output=nullptr;Copy("",error,capacity);
     if(!output || !directory || fps<1 || fps>20)return ROOM_SD_INVALID;
     int stage=ROOM_SD_GUARD;
+    std::unique_ptr<Handle> handle;
     try {
         const auto path=std::filesystem::u8path(directory);
         if(!path.is_absolute())throw std::runtime_error("Observer lock directory must be absolute");
@@ -28,11 +29,20 @@ int room_sd_open(uint32_t pid,const char* directory,uint32_t fps,void** output,c
         if(!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS|GET_MODULE_HANDLE_EX_FLAG_PIN,
                               reinterpret_cast<LPCWSTR>(&room_sd_open),&module))
             throw std::runtime_error("Unable to pin native compositor module");
-        auto handle=std::make_unique<Handle>();stage=ROOM_SD_BUSY;handle->lock.Acquire(path,pid);
+        handle=std::make_unique<Handle>();stage=ROOM_SD_BUSY;handle->lock.Acquire(path,pid);
         stage=ROOM_SD_ATTACH;handle->engine.Open(pid,ROOM_GUARDED_SCRIPT);
         handle->engine.Call("configure",room_sd::Json::array({{{"maxFps",fps}}}));
         *output=handle.release();return ROOM_SD_OK;
-    }catch(const std::exception& e){Copy(e.what(),error,capacity);return stage;}
+    }catch(const room_sd::OpenFailure& e){
+        room_sd::CleanupResult cleanup;std::string detail;
+        if(handle)handle->engine.Close(&detail,&cleanup);
+        Copy(std::string(e.what())+cleanup.Summary()+(detail.empty()?"":" cleanup_error="+detail),error,capacity);
+        return cleanup.AllowsRetry(e)?ROOM_SD_RETRY_OPEN:stage;
+    }catch(const std::exception& e){
+        room_sd::CleanupResult cleanup;std::string detail;
+        if(handle)handle->engine.Close(&detail,&cleanup);
+        Copy(std::string(e.what())+(handle?cleanup.Summary():"")+(detail.empty()?"":" cleanup_error="+detail),error,capacity);return stage;
+    }
     catch(...){Copy("Unknown native compositor failure",error,capacity);return stage;}
 }
 int room_sd_request(void* pointer,uint32_t operation,const uint8_t* data,uint32_t size,

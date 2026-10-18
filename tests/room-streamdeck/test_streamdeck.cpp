@@ -512,6 +512,9 @@ int main()
         Check(!recovery.contains("stack") && recovery["transportError"].get<std::string>().size()==512,"Transport error must be bounded without native stack");
         Check(AggregateCompositorStatus({{"sampledSteadyMs",nullptr},{"ageMs",nullptr}})["sampledSteadyMs"].is_null(),"First missing status must not invent a timestamp");
         Check(!AggregateCompositorStatus({{"transportState","secret-value"}}).contains("transportState"),"Transport state must use the closed enum");
+        const auto opening=AggregateCompositorStatus({{"retryKind","open"},{"openAttempts",4},{"retryAfterMs",8000}});
+        Check(opening["retryKind"]=="open"&&opening["openAttempts"]==4&&opening["retryAfterMs"]==8000,"Certified open retry diagnostics missing");
+        Check(!AggregateCompositorStatus({{"retryKind","untrusted"}}).contains("retryKind"),"Retry kind must use the closed enum");
         std::cout << "PASS bounded aggregate compositor metadata without images\n";
         TestOptionsAndImage();std::cout << "PASS configuration, native layout, BGRA and spatial gradients\n";
         TestCoalescingAndLease();std::cout << "PASS real mock HTTP, coalescing, pacing, lease and stop\n";

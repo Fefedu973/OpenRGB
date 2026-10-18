@@ -319,6 +319,44 @@ Binaires installés : core SHA256
 DLL native SHA256
 `D0C66326E9A09833CCE1FD1024D007CCBBAE98703F5D6EB4F05061B850092966`.
 
+### Initialisation annulée au démarrage — 18 octobre 2026
+
+Un nouveau cas a été observé avant la première image : Elgato venait de démarrer,
+`room_sd_open` renvoyait seulement `Operation was cancelled`, puis OpenRGB
+verrouillait son PID. Aucun handle ni statut de santé n'avait été obtenu. La
+récupération des RPC d'une session existante ne pouvait donc pas intervenir.
+Les hashes des trois fichiers Elgato et des deux binaires OpenRGB installés
+étaient inchangés. L'ancien message ne permet pas de retrouver laquelle des
+quatre étapes d'initialisation avait dépassé son délai.
+
+Les erreurs d'ouverture indiquent désormais la phase, le PID, le temps écoulé,
+le budget et le domaine/code GError. Le caractère annulé provient du type
+`G_IO_ERROR_CANCELLED`, jamais d'une comparaison du texte. L'attachement et le
+chargement disposent de cinq secondes ; les RPC d'animation restent à 1500 ms.
+Une tentative de chargement est suivie même si le chargement a été annulé :
+le script peut déjà avoir installé des hooks avant le retour de l'appel.
+
+Le code ABI `ROOM_SD_RETRY_OPEN=6` est réservé à une annulation typée dont le
+nettoyage a été vérifié, sans handle retourné. Il faut confirmer le détachement
+si une session a été créée, fermer le gestionnaire et conserver tout échec de
+nettoyage. Une garde refusée, une autre erreur d'attachement ou un nettoyage
+ambigu restent bloquants pour ce PID. Le client n'infère jamais qu'un simple
+message « cancelled » autorise un nouvel attachement.
+
+Après ce seul code réessayable, le client attend 1, 2, 4, 8 puis 10 secondes
+entre les tentatives. Le SDK indique `retryKind=open` et `openAttempts`, avec
+une santé inconnue jusqu'à une vraie réponse. `retryKind=rpc` conserve le
+comportement de la session existante. Un nouveau PID efface l'ancien cache et
+le délai d'ouverture. Le journal dédoublonne les échecs indépendamment du cache
+SDK, ce qui évite de répéter le même refus chaque seconde.
+
+Le test Frida utilise exclusivement son propre enfant synthétique : il annule
+un chargement après l'exécution d'un hook, vérifie le nettoyage puis rouvre le
+même enfant. Des appels natifs confirment que l'ancien hook a disparu et que
+le nouveau n'est pas doublé. Le vrai client et son worker passent également
+107 assertions, dont les reprises d'ouverture et le refus d'erreurs non
+réessayables contenant pourtant le même texte d'annulation.
+
 ## Compilation facultative
 
 Installer MSVC 2022 Build Tools et extraire le devkit officiel **Frida Core 17.18.0 Windows x86_64** avec 7-Zip. Il n'est pas nécessaire d'exécuter son archive auto-extractible.
@@ -374,9 +412,9 @@ Les images de l'interface générique `RGBControllerImageInterface`, le canal Fr
 
 ## Gardes et arrêt
 
-Avant tout attachement : chemin exact `C:\Program Files\Elgato\StreamDeck\StreamDeck.exe`, processus unique, SHA256 exact des trois binaires, puis verrou propriétaire. Le JS vérifie encore chemin, architecture, taille d'image et signatures de fonctions ; les objets doivent avoir les vtables, grille 5 × 3, géométrie et QImage temporaire attendues. Aucun mode de désactivation des gardes n'est exposé. Un échec de garde/attachement ou une faute native suspend les nouveaux attachements pour ce PID ; un nouveau processus Elgato permet une nouvelle tentative. Un simple timeout de réponse RPC conserve la session et utilise la récupération décrite plus haut. Une occupation du verrou reste réessayable après libération.
+Avant tout attachement : chemin exact `C:\Program Files\Elgato\StreamDeck\StreamDeck.exe`, processus unique, SHA256 exact des trois binaires, puis verrou propriétaire. Le JS vérifie encore chemin, architecture, taille d'image et signatures de fonctions ; les objets doivent avoir les vtables, grille 5 × 3, géométrie et QImage temporaire attendues. Aucun mode de désactivation des gardes n'est exposé. Un échec de garde/attachement ou une faute native suspend les nouveaux attachements pour ce PID, sauf l'annulation typée d'initialisation avec nettoyage confirmé décrite plus haut ; un nouveau processus Elgato permet une nouvelle tentative. Un simple timeout de réponse RPC conserve la session et utilise la récupération décrite plus haut. Une occupation du verrou reste réessayable après libération.
 
-L'export `setframe` ne reçoit que 311040 bytes BGRA opaques avec un bail de deux secondes. Le code validé n'a qu'une notification en cours et une dernière image. L'arrêt demande le fond normal et attend son acquittement pendant au plus trois secondes. Les appels Frida de chargement/détachement utilisent une annulation à deux secondes chacun ; ce mécanisme borne les opérations normales et ne prétend pas terminer de force un processus tiers bloqué. Les erreurs de restauration ou de détachement sont remontées. Aucun arrêt brutal de Frida/Elgato n'est utilisé.
+L'export `setframe` ne reçoit que 311040 bytes BGRA opaques avec un bail de deux secondes. Le code validé n'a qu'une notification en cours et une dernière image. L'arrêt demande le fond normal et attend son acquittement pendant au plus trois secondes. L'attachement et le chargement Frida utilisent une annulation à cinq secondes, les autres opérations d'initialisation et chaque étape de nettoyage à deux secondes ; ce mécanisme borne les opérations normales et ne prétend pas terminer de force un processus tiers bloqué. Les erreurs de restauration ou de détachement sont remontées. Aucun arrêt brutal de Frida/Elgato n'est utilisé.
 
 ## Provenance et licences
 

@@ -10,7 +10,7 @@ $commands=@(
  '@echo off','setlocal',"call `"$VcVars`" >nul",'if errorlevel 1 exit /b 2',"cd /d `"$build`"",
  "cl /nologo /EHsc /std:c++17 /MD /W4 /LD `"$PSScriptRoot\test_client_fake.cpp`" /Fe:client_fixture.dll /link /INCREMENTAL:NO",
  'if errorlevel 1 exit /b 1',
- "cl /nologo /EHsc /std:c++17 /MD /W4 /DNOMINMAX /I`"$root\dependencies\json`" `"$PSScriptRoot\test_client_recovery.cpp`" `"$root\Controllers\StreamDeckBackgroundController\StreamDeckNativeClient.cpp`" /Fe:client_recovery.exe",
+ "cl /nologo /EHsc /std:c++17 /MD /W4 /DNOMINMAX /D_CRT_SECURE_NO_WARNINGS /I`"$root\dependencies\json`" /I`"$root\dependencies\httplib`" `"$PSScriptRoot\test_client_recovery.cpp`" `"$root\Controllers\StreamDeckBackgroundController\StreamDeckNativeClient.cpp`" `"$root\Controllers\StreamDeckBackgroundController\StreamDeckBackgroundController.cpp`" /Fe:client_recovery.exe",
  'if errorlevel 1 exit /b 1','client_recovery.exe client_fixture.dll','exit /b %errorlevel%')
 [IO.File]::WriteAllLines((Join-Path $build 'run.cmd'),$commands,[Text.ASCIIEncoding]::new())
 & $env:ComSpec /d /c (Join-Path $build 'run.cmd')

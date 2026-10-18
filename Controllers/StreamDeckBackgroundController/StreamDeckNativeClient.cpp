@@ -30,11 +30,11 @@ bool ValidDiagnostics(const nlohmann::json& value)
 }
 struct NativeClient::Impl {
     std::string library,lock_directory;unsigned fps;void* handle=nullptr;
-    std::uint32_t failed_pid=0,active_pid=0;
+    std::uint32_t failed_pid=0,active_pid=0,observed_pid=0;
     Now now;
-    bool recovering=false,has_sample=false;
-    unsigned retry_seconds=1,recovery_attempts=0;
-    Clock::time_point next_probe{},sampled_at{};
+    bool recovering=false,opening_retry=false,has_sample=false;
+    unsigned retry_seconds=1,recovery_attempts=0,open_retry_seconds=1,open_attempts=0;
+    Clock::time_point next_probe{},next_open{},sampled_at{};
     std::string transport_state="disconnected",transport_error;
     nlohmann::json diagnostics;
     std::string close_error;
@@ -50,7 +50,10 @@ struct NativeClient::Impl {
         value["ageMs"]=has_sample?nlohmann::json(std::max<int64_t>(0,std::chrono::duration_cast<std::chrono::milliseconds>(now()-sampled_at).count())):nlohmann::json(nullptr);
         value["stale"]=!has_sample || transport_state!="active" || now()-sampled_at>std::chrono::seconds(5);
         value["recoveryAttempts"]=recovery_attempts;
-        value["retryAfterMs"]=recovering?std::max<int64_t>(0,std::chrono::duration_cast<std::chrono::milliseconds>(next_probe-now()).count()):0;
+        value["openAttempts"]=open_attempts;
+        value["retryKind"]=opening_retry?"open":recovering?"rpc":"none";
+        const auto deadline=opening_retry?next_open:next_probe;
+        value["retryAfterMs"]=(opening_retry||recovering)?std::max<int64_t>(0,std::chrono::duration_cast<std::chrono::milliseconds>(deadline-now()).count()):0;
         return value;
     }
 #ifdef _WIN32
@@ -78,19 +81,40 @@ struct NativeClient::Impl {
     void Connect()
     {
         Load();if(handle)return;const auto pid=find_process();
+        if(pid!=observed_pid)
+        {
+            // Never present a previous process's status as this target's health.
+            observed_pid=pid;diagnostics=nullptr;has_sample=false;
+            recovering=opening_retry=false;retry_seconds=open_retry_seconds=1;
+            recovery_attempts=open_attempts=0;next_open={};close_error.clear();transport_error.clear();
+        }
         if(!pid){transport_state="disconnected";transport_error="Waiting for the pinned Elgato application";throw std::runtime_error(transport_error);}
         if(pid==failed_pid){transport_state="faulted";throw std::runtime_error("Native compositor faulted; waiting for a new Elgato process");}
+        if(opening_retry && now()<next_open)throw std::runtime_error(transport_error);
         std::array<char,16384> error{};
+        ++open_attempts;
         const auto code=open(pid,lock_directory.c_str(),fps,&handle,error.data(),static_cast<uint32_t>(error.size()));
         if(code!=ROOM_SD_OK) {
+            if(handle){active_pid=pid;Fatal("Native compositor open returned a handle on failure");}
+            if(code==ROOM_SD_RETRY_OPEN && !handle)
+            {
+                // The DLL alone certifies typed initialization cancellation and
+                // completed cleanup. Never infer retry safety from error text.
+                open_retry_seconds=opening_retry?std::min(10u,open_retry_seconds*2):1;
+                opening_retry=true;transport_state="recovering";
+                transport_error="Native compositor opening retry after confirmed cleanup: "+std::string(error[0]?error.data():"Initialization cancelled");
+                next_open=now()+std::chrono::seconds(open_retry_seconds);
+                throw std::runtime_error(transport_error);
+            }
+            opening_retry=false;
             // A busy observer can be released normally. Unsupported guards and
             // attach faults stay suppressed for this process, not retried forever.
-            if(code==ROOM_SD_GUARD || code==ROOM_SD_ATTACH || code==ROOM_SD_RPC)failed_pid=pid;
+            if(code==ROOM_SD_GUARD || code==ROOM_SD_ATTACH || code==ROOM_SD_RPC || code==ROOM_SD_RETRY_OPEN)failed_pid=pid;
             transport_state=failed_pid==pid?"faulted":"disconnected";
             transport_error=error[0]?error.data():"Native compositor could not open";
             throw std::runtime_error(transport_error);
         }
-        active_pid=pid;close_error.clear();diagnostics=nullptr;has_sample=false;recovering=false;
+        active_pid=pid;close_error.clear();diagnostics=nullptr;has_sample=false;recovering=opening_retry=false;
         recovery_attempts=0;retry_seconds=1;transport_state="active";transport_error.clear();
     }
     std::string Close()
@@ -105,6 +129,7 @@ struct NativeClient::Impl {
     }
     void Recover(const std::string& reason)
     {
+        opening_retry=false;
         retry_seconds=recovering?std::min(10u,retry_seconds*2):1;
         recovering=true;transport_state="recovering";transport_error=reason.substr(0,512);
         next_probe=now()+std::chrono::seconds(retry_seconds);

@@ -19,7 +19,9 @@ extern "C" {
 enum { ROOM_SD_ABI = 1, ROOM_SD_STATUS = 1, ROOM_SD_LAYOUT = 2,
        ROOM_SD_FRAME = 3, ROOM_SD_STOP = 4 };
 enum { ROOM_SD_OK = 0, ROOM_SD_INVALID = 1, ROOM_SD_GUARD = 2,
-       ROOM_SD_BUSY = 3, ROOM_SD_ATTACH = 4, ROOM_SD_RPC = 5 };
+        ROOM_SD_BUSY = 3, ROOM_SD_ATTACH = 4, ROOM_SD_RPC = 5,
+        /* Cancelled initialization, no handle returned, cleanup verified. */
+        ROOM_SD_RETRY_OPEN = 6 };
 ROOM_SD_API uint32_t room_sd_abi(void);
 /* Read-only process identity lookup. No Frida calls, hash checks, or attachment. */
 ROOM_SD_API uint32_t room_sd_find_process(void);

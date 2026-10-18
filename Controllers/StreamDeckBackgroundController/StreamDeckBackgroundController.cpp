@@ -239,7 +239,11 @@ nlohmann::json AggregateCompositorStatus(const nlohmann::json& value)
     };
     for(const char* key:{"ready","armed","restorationPending","errors","compositions","paints","queued","acknowledged","restores","rejectedCandidates","pending","uptimeMs",
                         "stalled","queuedStalls","queueRecoveries","pendingAgeMs","pendingEntered",
-                        "sampledSteadyMs","ageMs","cached","stale","lastKnownReady","recoveryAttempts","retryAfterMs"}) copy_scalar(value,result,key);
+                        "sampledSteadyMs","ageMs","cached","stale","lastKnownReady","recoveryAttempts","openAttempts","retryAfterMs"}) copy_scalar(value,result,key);
+    const auto retry_kind=value.find("retryKind");
+    if(retry_kind!=value.end() && retry_kind->is_string())
+        for(const char* allowed:{"none","open","rpc"})
+            if(*retry_kind==allowed) result["retryKind"]=*retry_kind;
     const auto transport=value.find("transportState");
     if(transport!=value.end() && transport->is_string())
         for(const char* allowed:{"disconnected","active","recovering","faulted","closed"})
@@ -387,7 +391,8 @@ void Controller::Failure(const std::string& reason)
     bool report;
     {
         std::lock_guard<std::mutex> lock(mutex);
-        report = status.error != reason;
+        report = last_reported_error != reason;
+        last_reported_error = reason;
         status.state = "waiting";
         status.error = reason;
         ++status.failures;
@@ -528,6 +533,7 @@ void Controller::Run()
                 status.surface_width=pending.image->width;status.surface_height=pending.image->height;
             }
             status.error.clear();
+            last_reported_error.clear();
             status.stop_requested=false;
         }
         catch(const std::exception& error)
@@ -638,7 +644,7 @@ void Controller::RunSurface()
             last_sent=Clock::now();next_attempt=last_sent+interval;
             sent_sequence=frame.sequence;sent_generation=frame.generation;
             std::lock_guard<std::mutex> lock(mutex);
-            ++status.accepted;status.state="streaming";status.error.clear();status.stop_requested=false;
+            ++status.accepted;status.state="streaming";status.error.clear();last_reported_error.clear();status.stop_requested=false;
         }
         catch(const std::exception& error)
         {

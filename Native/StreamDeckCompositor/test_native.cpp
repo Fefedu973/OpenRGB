@@ -23,6 +23,17 @@ extern "C" __declspec(dllexport) __declspec(noinline) int RoomSyntheticInner(int
     for(int i=0;i<8;++i)result=result*7+i;
     return result;
 }
+static volatile LONG synthetic_marks=0;
+extern "C" __declspec(dllexport) __declspec(noinline) int RoomSyntheticMark()
+{return InterlockedIncrement(&synthetic_marks);}
+extern "C" __declspec(dllexport) __declspec(noinline) int RoomSyntheticMarks()
+{return InterlockedCompareExchange(&synthetic_marks,0,0);}
+extern "C" __declspec(dllexport) __declspec(noinline) int RoomSyntheticProbe(int value)
+{
+    volatile int result=value;
+    for(int i=0;i<9;++i)result=result*11+i;
+    return result;
+}
 
 static void Check(bool value,const char* why){if(!value)throw std::runtime_error(why);}
 template<class F>static void Reject(F fn){bool failed=false;try{fn();}catch(const std::exception&){failed=true;}Check(failed,"Expected rejection");}
@@ -61,7 +72,86 @@ int wmain(int argc,wchar_t** argv)
         {room_sd::ObserverLock after;after.Acquire(directory,GetCurrentProcessId());}
         std::cout<<"PASS pinned-path rejection, SHA256 and CRT-compatible observer lock\n";
         std::cerr<<"test: create child"<<std::endl;
-        Child child;std::cerr<<"test: engine init"<<std::endl;room_sd::Engine engine;
+        Child child;
+        {room_sd::Engine initialize_frida;} // GLib's embedded runtime before creating GError fixtures.
+        // Deterministic error classification and cleanup-policy matrix. Error
+        // text alone must never authorize a second attachment.
+        unsigned lifecycle_checks=0;
+        for(const char* phase:{"get-device","attach","create-script","load-script"}) {
+            for(bool cancelled:{false,true}) {
+                try {
+                    auto* error=g_error_new_literal(G_IO_ERROR,cancelled?G_IO_ERROR_CANCELLED:G_IO_ERROR_FAILED,"Operation was cancelled");
+                    room_sd::CheckOpenError(error,phase,child.process.dwProcessId,room_sd::Clock::now(),5000);
+                    Check(false,"Injected open error not thrown");
+                }catch(const room_sd::OpenFailure& failure) {
+                    Check(failure.cancelled==cancelled,"Typed error classification ignores text");++lifecycle_checks;
+                    Check(std::string(failure.what()).find(std::string("phase=")+phase)!=std::string::npos,"Open phase preserved");++lifecycle_checks;
+                    Check(std::string(failure.what()).find("deadline_ms=5000")!=std::string::npos,"Open deadline preserved");++lifecycle_checks;
+                }
+            }
+        }
+        const room_sd::OpenFailure cancellation("load-script",1,500,500,true,"g-io-error-quark",G_IO_ERROR_CANCELLED,"cancelled");
+        room_sd::CleanupResult clean;clean.had_session=true;clean.had_script=true;clean.load_attempted=true;clean.session_detached=true;clean.manager_closed=true;
+        const auto policy=[&](room_sd::CleanupResult result,bool expected,const char* why){Check(result.AllowsRetry(cancellation)==expected,why);++lifecycle_checks;};
+        policy(clean,true,"Partially loaded script explicitly detached can retry");
+        auto cleanup=clean;cleanup.ok=false;policy(cleanup,false,"Unload/detach error forbids retry even when local detached state is true");
+        cleanup=clean;cleanup.session_detached=false;policy(cleanup,false,"Missing detach acknowledgement forbids retry");
+        cleanup=clean;cleanup.manager_closed=false;policy(cleanup,false,"Manager cleanup error forbids retry");
+        cleanup=clean;cleanup.had_script=false;cleanup.load_attempted=false;policy(cleanup,true,"Create-script cancellation after confirmed detach can retry");
+        room_sd::CleanupResult before_script;before_script.manager_closed=true;
+        policy(before_script,true,"Cancelled attach without session or script can retry after manager cleanup");
+        cleanup=before_script;cleanup.manager_closed=false;policy(cleanup,false,"No-session path still requires manager cleanup");
+        cleanup=before_script;cleanup.had_script=true;policy(cleanup,false,"Unexpected script without session fails closed");
+        cleanup=before_script;cleanup.load_attempted=true;policy(cleanup,false,"Unaccounted attempted load fails closed");
+        const room_sd::OpenFailure actual_fault("load-script",1,500,500,false,"frida-error-quark",1,"Operation was cancelled");
+        Check(!clean.AllowsRetry(actual_fault),"Real initialization error stays fatal after successful cleanup");++lifecycle_checks;
+        try {room_sd::CheckOpenError(g_error_new_literal(g_quark_from_static_string("synthetic-other-domain"),G_IO_ERROR_CANCELLED,"Operation was cancelled"),"attach",1,room_sd::Clock::now(),5000);}
+        catch(const room_sd::OpenFailure& failure){Check(!failure.cancelled,"Matching error code in another domain is not cancellation");++lifecycle_checks;}
+        // Real cancellation after the child's script has already installed a
+        // hook, but before load_sync returns success. Unload must not depend on
+        // loaded=true. Cleanup and reopening use non-overlapping Engine scopes.
+        {
+            room_sd::Engine cancelled_engine;room_sd::OpenTimeouts limits;limits.load_script=500;
+            bool cancelled=false;
+            try {
+                cancelled_engine.Open(child.process.dwProcessId,R"JS(
+const mark=new NativeFunction(Process.mainModule.getExportByName('RoomSyntheticMark'),'int',[]);
+const probe=new NativeFunction(Process.mainModule.getExportByName('RoomSyntheticProbe'),'int',['int']);
+Interceptor.attach(Process.mainModule.getExportByName('RoomSyntheticProbe'),{onEnter(){mark();}});
+probe(1);
+new NativeFunction(Process.getModuleByName('kernel32.dll').getExportByName('Sleep'),'void',['uint'])(1500);
+rpc.exports={status(){return {ready:true};}};
+)JS",limits);
+            }catch(const room_sd::OpenFailure& failure) {
+                cancelled=true;room_sd::CleanupResult cleanup;std::string detail;
+                Check(failure.cancelled,"Real load failure is typed cancellation");
+                Check(std::string(failure.what()).find("phase=load-script")!=std::string::npos,"Real cancellation phase");
+                Check(cancelled_engine.Close(&detail,&cleanup),"Cancelled load cleanup succeeded");
+                Check(cleanup.load_attempted&&cleanup.had_script&&cleanup.had_session&&cleanup.session_detached,"Cancelled loaded hook detached explicitly");
+                Check(cleanup.AllowsRetry(failure),"Verified cancelled load may reopen");
+                std::cout<<failure.what()<<cleanup.Summary()<<"\n";
+            }
+            Check(cancelled,"Synthetic load must outlast its initialization budget");
+        }
+        {
+            room_sd::Engine reopened;
+            reopened.Open(child.process.dwProcessId,R"JS(
+const mark=new NativeFunction(Process.mainModule.getExportByName('RoomSyntheticMark'),'int',[]);
+const count=new NativeFunction(Process.mainModule.getExportByName('RoomSyntheticMarks'),'int',[]);
+const address=Process.mainModule.getExportByName('RoomSyntheticProbe');
+const probe=new NativeFunction(address,'int',['int']);
+rpc.exports={verify(){const initial=count();for(let i=0;i<10;i++)probe(i);const afterCleanup=count();
+ const hook=Interceptor.attach(address,{onEnter(){mark();}});for(let i=0;i<10;i++)probe(i);
+ const afterReopen=count();hook.detach();return {initial,afterCleanup,afterReopen};}};
+)JS");
+            const auto counts=reopened.Call("verify");
+            Check(counts["initial"].get<int>()>=1,"Cancelled load had really installed and executed its hook");
+            Check(counts["afterCleanup"]==counts["initial"],"Cancelled script has no surviving hook");
+            Check(counts["afterReopen"].get<int>()-counts["afterCleanup"].get<int>()==10,"Reopened session has exactly one hook");
+            std::string detail;Check(reopened.Close(&detail),"Reopened test session detached");
+            std::cout<<"PASS open lifecycle "<<lifecycle_checks<<" deterministic checks; real cancel/reopen hook counts "<<counts.dump()<<"\n";
+        }
+        std::cerr<<"test: engine init"<<std::endl;room_sd::Engine engine;
         // Exercise the production acceptance gate, not a duplicate test-only
         // implementation, with the same Windows clock in both processes.
         std::ifstream source_file(std::filesystem::path(__FILE__).parent_path()/"background-core.js",std::ios::binary);

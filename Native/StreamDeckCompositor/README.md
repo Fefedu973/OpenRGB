@@ -357,6 +357,23 @@ le nouveau n'est pas doublé. Le vrai client et son worker passent également
 107 assertions, dont les reprises d'ouverture et le refus d'erreurs non
 réessayables contenant pourtant le même texte d'annulation.
 
+Validation locale du 18 octobre à 20:18 : le core et la DLL du commit
+`823af0e0` ont été installés ensemble, en conservant les 77 fichiers JSON de
+configuration et les DLL Effects/VisualMap. Le processus Elgato est resté
+ouvert sur sa page actuelle. Après relance d'OpenRGB, le bootstrap a abouti
+en une tentative : 15 touches rendues et injectées, dont quatre vides,
+aucune erreur du compositeur et acquittements 341 à 401 sur quatre relevés
+successifs. L'utilisateur a confirmé le retour du fond et de la synchronisation
+sans changement de page. Cette relance n'a pas rencontré d'annulation : la
+branche de nouvelle tentative a été vérifiée par les tests synthétiques, pas
+par une annulation provoquée dans Elgato.
+
+L'ancienne instance OpenRGB est restée présente après la demande de fermeture,
+pendant le nettoyage des périphériques. L'arrêt de sa tâche planifiée a été
+nécessaire avant l'installation ; le journal ne permet pas d'attribuer cette
+attente à un pilote précis. Ce correctif ne revendique pas la résolution de
+ce blocage distinct à la fermeture.
+
 ## Compilation facultative
 
 Installer MSVC 2022 Build Tools et extraire le devkit officiel **Frida Core 17.18.0 Windows x86_64** avec 7-Zip. Il n'est pas nécessaire d'exécuter son archive auto-extractible.

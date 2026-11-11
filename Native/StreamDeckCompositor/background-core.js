@@ -6,7 +6,36 @@ const exe=Process.getModuleByName('StreamDeck.exe'),gui=Process.getModuleByName(
 // main module before any interceptor or native call is created instead.
 const expectedPath='c:\\program files\\elgato\\streamdeck\\streamdeck.exe';
 if(Process.mainModule.name.toLowerCase()!=='streamdeck.exe'||exe.path.replace(/\//g,'\\').toLowerCase()!==expectedPath)throw Error('Unexpected target main module/path');
-const meta=exe.base.add(0x1578290),start=Date.now();
+// BEGIN BUILD PROFILES
+// The native loader first verifies all three file hashes. Size selects only
+// between those exact builds; instruction and object guards remain mandatory.
+const BUILD_PROFILES=[{
+ version:'7.5.1.22901',imageSize:0x1aab000,
+ meta:0x1578290,ownerVtable:0x16555e8,composerVtable:0x166f090,
+ rva:{compose:0x5c8550,animate:0x419a80,notificationType:0x41551b,copyVector:0x177c80,
+  renderGrid:0x4164a0,makeImage:0x5c52b0,blankNoBundle:0x5c544e,
+  renderBundle:0x5c8a80,blankNoLayer:0x5c8b95,clearImageCache:0x5c8b51,testImageCache:0x60ed0a},
+ signatures:{compose:'488bc444894018555356574154415541',animate:'48895c24185556574154415541564157',
+  notificationType:'c744243002000000',copyVector:'48895c24084889742410574883ec20',
+  renderGrid:'48895c2410488974241848897c242055',makeImage:'48895c242055565741564157',
+  blankNoBundle:'0f57c00f11070f114710488d9680000000',renderBundle:'48895c242055565741564157',
+  blankNoLayer:'488d5f10488bcbff15de527800',clearImageCache:'4c897dbf488d7710',testImageCache:'4d3966480f8ea0000000'}
+},{
+ version:'7.6.1.23033',imageSize:0x1aeb000,
+ meta:0x15a2ed0,ownerVtable:0x1681a50,composerVtable:0x169c550,
+ rva:{compose:0x5d20b0,animate:0x41b1c0,notificationType:0x416c3b,copyVector:0x176ff0,
+  renderGrid:0x417be0,makeImage:0x5cefd0,blankNoBundle:0x5cf16e,
+  renderBundle:0x5d25e0,blankNoLayer:0x5d26f5,clearImageCache:0x5d26b1,testImageCache:0x619b7a},
+ signatures:{compose:'488bc444894018555356574154415541',animate:'48895c24185556574154415541564157',
+  notificationType:'c744243002000000',copyVector:'48895c24084889742410574883ec20',
+  renderGrid:'48895c2410488974241848897c242055',makeImage:'48895c242055565741564157',
+  blankNoBundle:'0f57c00f11070f114710488d9680000000',renderBundle:'48895c242055565741564157',
+  blankNoLayer:'488d5f10488bcbff15ae877800',clearImageCache:'4c897dbf488d7710',testImageCache:'4d3966480f8ea0000000'}
+}];
+// END BUILD PROFILES
+const build=BUILD_PROFILES.find(candidate=>candidate.imageSize===exe.size);
+if(Process.arch!=='x64'||!build)throw Error('Unsupported Stream Deck build');
+const meta=exe.base.add(build.meta),start=Date.now();
 let target=null,armed=false,deadline=0,dirty=false,restore=false,colors=null,tiles=null;
 let pending=null,sequence=0,lastQueued=0,errors=0,compositions=0,paints=0,acknowledged=0,restores=0,rejectedCandidates=0;
 let stalled=false,queuedStalls=0,queueRecoveries=0,abandonedFrames=0;
@@ -77,20 +106,9 @@ function emit(event,data={}){send({event,...data});}
 function check(m,rva,hex){const b=Array.from(new Uint8Array(m.base.add(rva).readByteArray(hex.length/2))).map(x=>x.toString(16).padStart(2,'0')).join('');if(b!==hex)throw Error('Unsupported code '+m.name+'+'+rva.toString(16));}
 function describe(p){try{const a=ptr(p),m=Process.findModuleByAddress(a);return m?m.name+'+'+a.sub(m.base):a.toString();}catch(_){return null;}}
 function fail(e){armed=false;dirty=false;restore=false;errors++;const fault={message:String(e),type:e.type||null,address:e.address?describe(e.address):null,pc:e.context?describe(e.context.pc):null,stack:e.stack||null,lastFrameCoverage};if(!lastFault)lastFault=fault;emit('native-error',fault);}
-if(Process.arch!=='x64'||exe.size!==0x1aab000)throw Error('Unsupported Stream Deck build');
-check(exe,0x5c8550,'488bc444894018555356574154415541');
-check(exe,0x419a80,'48895c24185556574154415541564157');
-check(exe,0x41551b,'c744243002000000');
-check(exe,0x177c80,'48895c24084889742410574883ec20');
-check(exe,0x4164a0,'48895c2410488974241848897c242055');
-check(exe,0x5c52b0,'48895c242055565741564157');
-check(exe,0x5c544e,'0f57c00f11070f114710488d9680000000');
-check(exe,0x5c8a80,'48895c242055565741564157');
-check(exe,0x5c8b95,'488d5f10488bcbff15de527800');
 // Image_t +0x18 is the encoded-image cache selector. These two instructions
 // prove the forced action path clears it and the upload task tests it.
-check(exe,0x5c8b51,'4c897dbf488d7710');
-check(exe,0x60ed0a,'4d3966480f8ea0000000');
+for(const [name,signature] of Object.entries(build.signatures))check(exe,build.rva[name],signature);
 // These pinned Qt instructions are the provenance of the read-only TLS walk:
 // currentThread() -> current QThreadData -> QThread*, and QObject::thread().
 check(core,0x26cab0,'8b0dbaea750065488b042558000000ba68000000488b04c8488b0402c3');
@@ -102,8 +120,8 @@ check(gui,0x3ab50,'40534883ec204883791000');
 const activate=new NativeFunction(core.getExportByName('?activate@QMetaObject@@SAXPEAVQObject@@PEBU1@HPEAPEAX@Z'),'void',['pointer','pointer','int','pointer'],'win64');
 const fill=new NativeFunction(gui.getExportByName('?fill@QImage@@QEAAXI@Z'),'void',['pointer','uint'],'win64');
 const bits=new NativeFunction(gui.getExportByName('?bits@QImage@@QEAAPEAEXZ'),'pointer',['pointer'],'win64');
-const originalAnimate=new NativeFunction(exe.base.add(0x419a80),'void',['pointer','pointer'],'win64');
-const renderGrid=new NativeFunction(exe.base.add(0x4164a0),'void',['pointer','uint'],'win64');
+const originalAnimate=new NativeFunction(exe.base.add(build.rva.animate),'void',['pointer','pointer'],'win64');
+const renderGrid=new NativeFunction(exe.base.add(build.rva.renderGrid),'void',['pointer','uint'],'win64');
 const objectThread=new NativeFunction(core.getExportByName('?thread@QObject@@QEBAPEAVQThread@@XZ'),'pointer',['pointer'],'win64');
 const currentQtThread=new NativeFunction(core.getExportByName('?currentThread@QThread@@SAPEAV1@XZ'),'pointer',[],'win64');
 const kernel=Process.getModuleByName('kernel32.dll'),ntdll=Process.getModuleByName('ntdll.dll'),user=Process.getModuleByName('user32.dll');
@@ -113,7 +131,7 @@ const openThread=new NativeFunction(kernel.getExportByName('OpenThread'),'pointe
 const closeHandle=new NativeFunction(kernel.getExportByName('CloseHandle'),'int',['pointer'],'win64');
 const queryThread=new NativeFunction(ntdll.getExportByName('NtQueryInformationThread'),'int',['pointer','uint','pointer','uint','pointer'],'win64');
 const postThreadMessage=new NativeFunction(user.getExportByName('PostThreadMessageW'),'int',['uint','uint','pointer','pointer'],'win64');
-function validTarget(t){return t&&t.composer.readPointer().equals(exe.base.add(0x166f090))&&t.owner.readPointer().equals(exe.base.add(0x16555e8))&&t.owner.add(0x18).readU32()===5&&t.owner.add(0x1c).readU32()===3;}
+function validTarget(t){return t&&t.composer.readPointer().equals(exe.base.add(build.composerVtable))&&t.owner.readPointer().equals(exe.base.add(build.ownerVtable))&&t.owner.add(0x18).readU32()===5&&t.owner.add(0x1c).readU32()===3;}
 function ownerOf(bundle){const composer=bundle.add(0x28).readPointer().sub(0x10),owner=composer.sub(0x4f0),t={composer,owner};return validTarget(t)?t:null;}
 function validTileImage(image){
  const d=image.add(16).readPointer();
@@ -180,7 +198,7 @@ function discoverBootstrap(now){
    const data=block.add(0x68).readPointer();if(data.isNull())continue;
    const qthread=data.add(0x50).readPointer();if(qthread.isNull())continue;
    qtThreads.push({id:thread.id,qthread});
-   if(!qthread.readPointer().equals(exe.base.add(0x166f090)))continue;
+   if(!qthread.readPointer().equals(exe.base.add(build.composerVtable)))continue;
    const t={composer:qthread,owner:qthread.sub(0x4f0)};
    if(validTarget(t)&&validTileImage(qthread.add(0x80)))found.push(t);
   }catch(_){/* An exiting/non-Qt thread is not a candidate. */}
@@ -226,14 +244,14 @@ Interceptor.attach(core.base.add(0x25e7f0),{onEnter(){
  }
 }});
 // Tag the actual Qt-owned vector, not unrelated native animation notifications.
-Interceptor.attach(exe.base.add(0x177c80),{onEnter(a){
+Interceptor.attach(exe.base.add(build.rva.copyVector),{onEnter(a){
  if(pending&&a[1].equals(pending.input)){pending.copies.add(a[0].toString());}
 }});
 // The usual animate slot filters out keys absent from the action map. Our
 // Qt-owned notification instead renders the existing full grid on THAT thread.
 // 0x20010 selects device output and skips layer reassignment; no actions are
 // created and the UI-preview branch is not requested. Untagged calls are intact.
-Interceptor.replace(exe.base.add(0x419a80),new NativeCallback((owner,vector)=>{
+Interceptor.replace(exe.base.add(build.rva.animate),new NativeCallback((owner,vector)=>{
  if(!target||!owner.equals(target.owner)||!pending||!pending.copies.has(vector.toString())){
   originalAnimate(owner,vector);return;
  }
@@ -285,7 +303,7 @@ function queueFrame(isRestore,isBootstrap=false){
 }
 // Only our exact Qt notification uses synchronous composition. Preserve
 // bundle render options and set the non-filtering immediate-render bit0.
-Interceptor.attach(exe.base.add(0x5c8a80),{onEnter(a){
+Interceptor.attach(exe.base.add(build.rva.renderBundle),{onEnter(a){
  if(errors||!activeFrames.has(Process.getCurrentThreadId()))return;
  try{
   const t=ownerOf(a[0]);if(!t||!target||!t.composer.equals(target.composer))return;
@@ -309,7 +327,7 @@ function paintTile(image,key,frame){
 // Observe the native factory while it owns the composer lock. The exact blank
 // branch is positive evidence of a copied empty tile: never infer emptiness from
 // a missed compose callback or overwrite an already composed action image.
-Interceptor.attach(exe.base.add(0x5c52b0),{onEnter(a){
+Interceptor.attach(exe.base.add(build.rva.makeImage),{onEnter(a){
  this.tid=Process.getCurrentThreadId();
  this.call={composer:a[0],out:a[1],key:a[2].toInt32(),keyPointer:a[2],blank:false};
  const stack=factoryCalls.get(this.tid)||[];stack.push(this.call);factoryCalls.set(this.tid,stack);
@@ -344,7 +362,7 @@ Interceptor.attach(exe.base.add(0x5c52b0),{onEnter(a){
   if(activeFrames.has(this.tid))fail(e);
  }
 }});
-Interceptor.attach(exe.base.add(0x5c544e),{onEnter(){
+Interceptor.attach(exe.base.add(build.rva.blankNoBundle),{onEnter(){
  const stack=factoryCalls.get(Process.getCurrentThreadId()),call=stack&&stack[stack.length-1];
  // RSI/RDI are the guarded function's composer/output locals, not arguments
  // guessed at a mid-function address. This hook only records the branch.
@@ -354,11 +372,11 @@ Interceptor.attach(exe.base.add(0x5c544e),{onEnter(){
 // layers (the state calculation returned bit0=0). This branch copies only the
 // bundle's base image, bypassing the pre-overlay compositor altogether. Mark it
 // positively; the factory onLeave still validates and detaches the returned copy.
-Interceptor.attach(exe.base.add(0x5c8b95),{onEnter(){
+Interceptor.attach(exe.base.add(build.rva.blankNoLayer),{onEnter(){
  const stack=factoryCalls.get(Process.getCurrentThreadId()),call=stack&&stack[stack.length-1];
  if(call&&call.bundle&&this.context.rdi.equals(call.bundle))call.blank=true;
 }});
-Interceptor.attach(exe.base.add(0x5c8550),{onEnter(a){
+Interceptor.attach(exe.base.add(build.rva.compose),{onEnter(a){
  compositions++;
  try{
   const bundle=a[0],image=a[1],t=ownerOf(bundle);if(!t)return;

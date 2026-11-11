@@ -1,13 +1,21 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 // Execute the production Frida script against an isolated native/Qt memory model.
 // No Frida module, process attachment, device, network or GUI is used here.
-const {test}=require('node:test');
+const {test:nodeTest}=require('node:test');
 const assert=require('node:assert/strict');
 const fs=require('node:fs');
 const vm=require('node:vm');
 const source=fs.readFileSync(require('node:path').join(__dirname,'background-core.js'),'utf8');
 
-function fixture(options={}) {
+const profileBlock=source.match(/\/\/ BEGIN BUILD PROFILES([\s\S]*?)\/\/ END BUILD PROFILES/);
+assert(profileBlock,'production build profiles are explicitly delimited');
+const profiles=vm.runInNewContext(profileBlock[1]+';BUILD_PROFILES',{}, {timeout:100});
+assert(profiles.length>0);
+assert.equal(new Set(profiles.map(p=>p.version)).size,profiles.length);
+assert.equal(new Set(profiles.map(p=>p.imageSize)).size,profiles.length);
+
+function createFixture(options={}) {
+ const build=profiles.find(p=>p.version===options.version)||profiles[0];
  const memory=[],hooks=new Map(),replacements=new Map(),functions=new Map(),events=[],queue=[];
  let address=0x200000000,now=1000,wallOffset=0,inputSequence=0,timer,originalCalls=0,gridCalls=0,output=[],descriptors=[],uploaded=[],tid=77,opened=0,closed=0,wakeups=[],listenerDepth=0;
  class Pointer {
@@ -26,13 +34,18 @@ function fixture(options={}) {
  }
  function ptr(n){return new Pointer(n);}
  function alloc(size){const p=ptr(address);address+=size+64;memory.push({at:p.n,data:Buffer.alloc(size)});return p;}
- const exe={name:'StreamDeck.exe',path:'C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe',base:ptr(0x100000000),size:0x1aab000};
+ const exe={name:'StreamDeck.exe',path:'C:\\Program Files\\Elgato\\StreamDeck\\StreamDeck.exe',base:ptr(0x100000000),size:options.imageSize??build.imageSize};
  const gui={name:'Qt6Gui.dll',base:ptr(0x110000000)},core={name:'Qt6Core.dll',base:ptr(0x120000000)};
  const kernel={name:'kernel32.dll',base:ptr(0x130000000)},ntdll={name:'ntdll.dll',base:ptr(0x140000000)},user={name:'user32.dll',base:ptr(0x150000000)};
  const modules={exe,gui,core,kernel,ntdll,user},exports=new Map();
  for(const m of Object.values(modules))m.getExportByName=name=>{
   if(!exports.has(name))exports.set(name,alloc(8));return exports.get(name);
  };
+ for(const [name,hex] of Object.entries(build.signatures)){
+  const bytes=Buffer.from(hex,'hex');
+  if(options.badGuard===build.rva[name])bytes[0]^=1;
+  memory.push({at:exe.base.n+build.rva[name],data:bytes});
+ }
  for(const match of source.matchAll(/check\((exe|gui|core),(0x[0-9a-f]+),'([0-9a-f]+)'\)/g)) {
   const bytes=Buffer.from(match[3],'hex');
   if(options.badGuard===Number(match[2]))bytes[0]^=1;
@@ -63,8 +76,8 @@ function fixture(options={}) {
  const owner=alloc(0x800),composer=owner.add(0x4f0),blank=data(),bundles=Array.from({length:15},(_,key)=>{
   const b=alloc(0x60);b.writeU64(key);b.add(0x28).writePointer(composer.add(0x10));b.add(0x48).writeU32(4);return b;
  });
- owner.writePointer(exe.base.add(0x16555e8));owner.add(0x18).writeU32(5);owner.add(0x1c).writeU32(3);
- composer.writePointer(exe.base.add(0x166f090));composer.add(0x28).writeU32(72);composer.add(0x2c).writeU32(72);
+ owner.writePointer(exe.base.add(build.ownerVtable));owner.add(0x18).writeU32(5);owner.add(0x1c).writeU32(3);
+ composer.writePointer(exe.base.add(build.composerVtable));composer.add(0x28).writeU32(72);composer.add(0x2c).writeU32(72);
  composer.add(0x80+16).writePointer(blank); // native blank is shared across factory copies
  const tlsIndex=ptr(core.base.n+0x9cb570);memory.push({at:tlsIndex.n,data:Buffer.alloc(4)});tlsIndex.writeU32(options.invalidTlsIndex?4096:3);
  const guiQThread=alloc(32),threadRecords=[];
@@ -95,42 +108,42 @@ function fixture(options={}) {
  const api={};
  functions.set(core.getExportByName('?activate@QMetaObject@@SAXPEAVQObject@@PEBU1@HPEAPEAX@Z').toString(),(c,m,index,argv)=>{
   options.duringActivate?.(sandbox.rpc.exports);
-  assert(c.equals(composer));const input=argv.add(8).readPointer(),copy=alloc(24);
-  invoke(exe.base.add(0x177c80),[copy,input]);queue.push(()=>invoke(exe.base.add(0x419a80),[owner,copy]));
+  assert(c.equals(composer));assert(m.equals(exe.base.add(build.meta)));assert.equal(index,0);const input=argv.add(8).readPointer(),copy=alloc(24);
+  invoke(exe.base.add(build.rva.copyVector),[copy,input]);queue.push(()=>invoke(exe.base.add(build.rva.animate),[owner,copy]));
   if(options.syncActivate)queue.shift()();
  });
  functions.set(gui.getExportByName('?bits@QImage@@QEAAPEAEXZ').toString(),image=>detach(image));
  functions.set(gui.getExportByName('?fill@QImage@@QEAAXI@Z').toString(),(image,rgb)=>{
   const p=detach(image),bytes=Buffer.alloc(20736);for(let i=0;i<bytes.length;i+=4)bytes.writeUInt32LE(rgb>>>0,i);p.writeByteArray(bytes);
  });
- functions.set(exe.base.add(0x419a80).toString(),()=>{originalCalls++;});
- functions.set(exe.base.add(0x5c8a80).toString(),(bundle,out,unused,flags)=>{
+ functions.set(exe.base.add(build.rva.animate).toString(),()=>{originalCalls++;});
+ functions.set(exe.base.add(build.rva.renderBundle).toString(),(bundle,out,unused,flags)=>{
   assert(flags.toInt32()&1,'tagged action rendering must be synchronous');
   const image=out.add(0x20);image.add(16).writePointer(blank);
   out.writeU64(bundle.readU64().toNumber());out.add(0x18).writeU64(123456);
   if(options.inactiveBundles?.includes(bundle.readU64().toNumber())){
-   point(0x5c8b95,{rdi:bundle});return out;
+   point(build.rva.blankNoLayer,{rdi:bundle});return out;
   }
   // Native forced foreground rendering clears Image_t's encoded cache selector.
   out.add(0x18).writeU64(0);
-  if(options.missedAction!==bundle.readU64().toNumber())invoke(exe.base.add(0x5c8550),[bundle,image]);
+  if(options.missedAction!==bundle.readU64().toNumber())invoke(exe.base.add(build.rva.compose),[bundle,image]);
   // Native icon/title overlay comes AFTER our pre-overlay background hook.
   const p=detach(image);p.writeByteArray(Buffer.from([251,252,253,255]));return out;
  });
- functions.set(exe.base.add(0x5c52b0).toString(),(c,out,keyPointer)=>{
+ functions.set(exe.base.add(build.rva.makeImage).toString(),(c,out,keyPointer)=>{
   const key=keyPointer.toInt32();
-  if(actions.has(key))invoke(exe.base.add(0x5c8a80),[bundles[key],out,ptr(0),ptr(0)]);
-  else{point(0x5c544e,{rsi:c,rdi:out});out.add(0x20+16).writePointer(blank);}
+  if(actions.has(key))invoke(exe.base.add(build.rva.renderBundle),[bundles[key],out,ptr(0),ptr(0)]);
+  else{point(build.rva.blankNoBundle,{rsi:c,rdi:out});out.add(0x20+16).writePointer(blank);}
   if(options.badImage===key)out.add(0x20+16).writePointer(ptr(0));
   if(options.badStride===key){const image=out.add(0x20);detach(image);image.add(16).readPointer().add(72).writeU64(300);}
   return out;
  });
- functions.set(exe.base.add(0x4164a0).toString(),(o,flags)=>{
+ functions.set(exe.base.add(build.rva.renderGrid).toString(),(o,flags)=>{
   assert(o.equals(owner));assert.equal(flags,0x20010);gridCalls++;output=[];descriptors=[];uploaded=[];
   for(let key=0;key<15;key++){
    if(options.skip===key)continue;
    options.duringRender?.({key,rpc:sandbox.rpc.exports,tick(ms){now+=ms;timer();}});
-   const out=alloc(128);invoke(exe.base.add(0x5c52b0),[composer,out,ptr(key),ptr(0)]);
+   const out=alloc(128);invoke(exe.base.add(build.rva.makeImage),[composer,out,ptr(key),ptr(0)]);
    const image=out.add(0x20),cache=out.add(0x18).readU64().toNumber(),destination=out.readU64().toNumber();
    // Model UploadXIconTask, not just the modified QImage: a positive selector
    // uses a pre-existing encoded blank and skips the painted pixels entirely.
@@ -139,12 +152,12 @@ function fixture(options={}) {
    descriptors[key]={cache,destination};uploaded[destination]=output[key];
   }
  });
- const sandbox={Process:{mainModule:exe,arch:'x64',id:1,getModuleByName:n=>Object.values(modules).find(m=>m.name===n),getCurrentThreadId:()=>tid,enumerateThreads:()=>options.tooManyThreads?Array.from({length:513},(_,i)=>({id:i})):threadRecords.map(x=>({id:x.id}))},
+ const sandbox={Process:{mainModule:exe,arch:options.arch??'x64',id:1,getModuleByName:n=>Object.values(modules).find(m=>m.name===n),getCurrentThreadId:()=>tid,enumerateThreads:()=>options.tooManyThreads?Array.from({length:513},(_,i)=>({id:i})):threadRecords.map(x=>({id:x.id}))},
   Memory:{alloc},ptr,NativeFunction:function(p){return (...args)=>invoke(p,args,{},true);},NativeCallback:function(f){return f;},
-  Interceptor:{attach(p,h){const key=p.toString();hooks.set(key,[...(hooks.get(key)||[]),h]);},replace(p,f){replacements.set(p.toString(),f);}},
+  Interceptor:{attach(p,h){options.onInterceptor?.();const key=p.toString();hooks.set(key,[...(hooks.get(key)||[]),h]);},replace(p,f){options.onInterceptor?.();replacements.set(p.toString(),f);}},
   rpc:{exports:api},send:e=>events.push(e),setInterval:f=>{timer=f;},Date:{now:()=>now+wallOffset},ArrayBuffer,Uint8Array};
  vm.runInNewContext(source,sandbox,{filename:'background-core.js'});
- function naturalEmpty(){const old=actions;actions=new Set();const out=alloc(128);invoke(exe.base.add(0x5c52b0),[composer,out,ptr(0),ptr(0)]);actions=old;}
+ function naturalEmpty(){const old=actions;actions=new Set();const out=alloc(128);invoke(exe.base.add(build.rva.makeImage),[composer,out,ptr(0),ptr(0)]);actions=old;}
  return {rpc:sandbox.rpc.exports,events,naturalEmpty,queue,
   dispatch(threadId=77){const old=tid;tid=threadId;try{invoke(core.base.add(0x25e7f0));}finally{tid=old;}},
   changeAffinity(){affinity=ptr(0);},get handles(){return {opened,closed};},get wakeups(){return wakeups;},
@@ -152,13 +165,17 @@ function fixture(options={}) {
   frame(data,{ms=2000,expiresAt=now+ms,sequence=++inputSequence}={}){return sandbox.rpc.exports.setframe(ms,expiresAt,sequence,data);},
   get now(){return now;},wallJump(ms){wallOffset+=ms;},
   colors(rgb=[100,50,25]){return sandbox.rpc.exports.setcolors(Array.from({length:15},()=>rgb),2000);},
-  untagged(){invoke(exe.base.add(0x419a80),[owner,alloc(24)]);},
+  untagged(){invoke(exe.base.add(build.rva.animate),[owner,alloc(24)]);},
   setActions(keys){actions=new Set(keys);},expireTarget(){owner.writePointer(ptr(0));},
   removeTargetMemory(){memory.splice(memory.findIndex(b=>b.at===owner.n),1);},
   get output(){return output;},get descriptors(){return descriptors;},get uploaded(){return uploaded;},get originalCalls(){return originalCalls;},get gridCalls(){return gridCalls;},
   get blank(){return Buffer.from(pixelStorage.get(blank.n).readByteArray(20736));}
  };
 }
+
+for(const profile of profiles){
+ const fixture=options=>createFixture({...options,version:profile.version});
+ const test=(name,body)=>nodeTest(profile.version+': '+name,body);
 
 test('mixed grid paints 15 current cells, leaves icons and native shared blank intact',()=>{
  const f=fixture();f.naturalEmpty();const blank=Buffer.from(f.blank);f.colors();f.tick();
@@ -216,7 +233,10 @@ test('stop while queued and lease expiry render only native restore',()=>{
   assert.equal(f.rpc.status().paints,0);assert.equal(f.rpc.status().restores,1);assert.deepEqual(f.output[0],f.blank);}
 });
 test('exact new native entry/branch guards reject before any interceptor',()=>{
- for(const rva of [0x4164a0,0x5c52b0,0x5c544e,0x5c8b95,0x5c8b51,0x60ed0a,0x26cab0,0x1a54e0,0x100e80,0x25e7f0])assert.throws(()=>fixture({badGuard:rva}),/Unsupported code/);
+ for(const rva of [...Object.values(profile.rva),0x26cab0,0x1a54e0,0x100e80,0x25e7f0,0x43970,0x3ab50]){
+  let interceptions=0;assert.throws(()=>fixture({badGuard:rva,onInterceptor(){interceptions++;}}),/Unsupported code/);
+  assert.equal(interceptions,0,'all code guards precede every interceptor');
+ }
 });
 
 test('queued delay is nonfatal and keeps exactly one Qt notification until native restoration',()=>{
@@ -436,3 +456,11 @@ test('stop during the native monotonic clock read cancels frame acceptance befor
  assert.equal(f.frame(opaqueFrame()).reason,'native-frame-cancelled');assert.equal(f.rpc.status().armed,false);
  f.tick();f.drain();assert.equal(f.rpc.status().paints,0);assert.equal(f.rpc.status().restores,1);
 });
+
+ test('unknown build size or architecture refuses before any interceptor',()=>{
+  for(const options of [{imageSize:0x123000},{arch:'arm64'}]){
+   let interceptions=0;assert.throws(()=>fixture({...options,onInterceptor(){interceptions++;}}),/Unsupported Stream Deck build/);
+   assert.equal(interceptions,0);
+  }
+ });
+}

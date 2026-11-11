@@ -2,6 +2,61 @@
 
 Ce module optionnel Windows x64 remplace le serveur Python/HTTP par **Frida Core embarqué dans le processus OpenRGB**. Le découpage des images, le contrôle des baux et le transport sont natifs. Elgato Stream Deck reste ouvert et compose normalement les icônes, titres et actions après le fond injecté. Un hook en mémoire demeure nécessaire ; ce module ne remplace pas l'application Elgato et n'écrit ni profil, ni stockage, ni USB directement.
 
+## Versions Elgato et mise à jour du 11 novembre 2026
+
+Deux versions Windows x64 sont reconnues explicitement : **7.5.1.22901** et
+**7.6.1.23033**. Chaque exécutable conserve sa propre empreinte SHA256 autorisée
+et son profil d'adresses dans `background-core.js`. Les deux bibliothèques Qt
+6.11.1 sont identiques dans ces versions et restent vérifiées par leur hash.
+Une version inconnue est refusée avant attachement ; il ne suffit pas de
+remplacer une empreinte pour déclarer un nouveau binaire compatible.
+
+Pour 7.6.1, la comparaison des corps de fonctions complets conserve les opcodes,
+registres, constantes, offsets de champs et branches internes, en neutralisant
+seulement les adresses déplacées. Les imports, cibles directes, métadonnées Qt
+et identités RTTI des vtables ont été comparés séparément. Les offsets utilisés
+par le mod restent inchangés. Deux différences indirectes sont documentées :
+des variables TLS privées déplacées, que le mod ne lit pas, et des arguments de
+journalisation supplémentaires dans la branche d'erreur d'un index ≥ 1024.
+
+| Point | 7.5.1.22901 RVA | 7.6.1.23033 RVA |
+|---|---:|---:|
+| Composition avant icônes | `0x5c8550` | `0x5d20b0` |
+| Slot animation | `0x419a80` | `0x41b1c0` |
+| Copie du vecteur Qt | `0x177c80` | `0x176ff0` |
+| Rendu de la grille | `0x4164a0` | `0x417be0` |
+| Factory d'images | `0x5c52b0` | `0x5cefd0` |
+| Rendu du bundle | `0x5c8a80` | `0x5d25e0` |
+| Branche vide sans bundle | `0x5c544e` | `0x5cf16e` |
+| Branche sans premier plan | `0x5c8b95` | `0x5d26f5` |
+| Metaobject du compositeur | `0x1578290` | `0x15a2ed0` |
+| Vtable compositeur | `0x166f090` | `0x169c550` |
+| Vtable propriétaire | `0x16555e8` | `0x1681a50` |
+
+Le préflight lit les fichiers PE sans les exécuter : il vérifie les trois
+empreintes, la taille d'image, les 17 signatures et les plages de données.
+Il ne démontre ni la sémantique complète des fonctions ni le rendu réel :
+
+```powershell
+node .\Native\StreamDeckCompositor\verify_pinned_build.cjs 'C:\Program Files\Elgato\StreamDeck'
+node --test .\Native\StreamDeckCompositor\test_verify_pinned_build.cjs
+```
+
+Validation avant installation : 78 scénarios JS sur les deux profils, dix
+tests du préflight, 35 contrôles du cycle d'initialisation, 2000 réponses RPC
+et les tests Frida synthétiques passent. Les deux snapshots réels passent
+17/17 signatures. Sur l'application 7.6.1 déjà ouverte, le test matériel a
+traité 127 images sur huit secondes, avec 15/15 touches peintes, zéro erreur
+et restauration acquittée. La découverte initiale a réussi sans changement de
+page. Cette première page avait quinze actions : le test ne valide pas à lui
+seul les cases vides de la nouvelle version.
+
+Pour une future mise à jour : conserver les anciens fichiers, identifier le
+nouveau build, comparer les fonctions/structures et leurs dépendances, ajouter
+un profil exact, puis valider les tests et le rendu réel (icônes, cases vides,
+restauration et démarrage sans changement de page). Les binaires propriétaires
+et les sauvegardes locales ne sont pas publiés dans le dépôt.
+
 ## Validation du 27 septembre 2026
 
 Le test physique **antérieur au correctif des cases vides**, sur une page peuplée, a produit 126 images 800 × 600 sur huit secondes : 126 notifications acquittées, 1890 peintures couvrant les quinze touches, zéro erreur, environ 16 images/s réelles pour un plafond de 20. La latence d'acquittement avait un p95 de 7 ms. La restauration normale a été acquittée et le détachement terminé. L'utilisateur a également confirmé visuellement le fond animé natif et les quinze icônes correctes. Ces mesures ne validaient pas les cases sans action : leur défaut a été signalé ensuite sur une autre page.

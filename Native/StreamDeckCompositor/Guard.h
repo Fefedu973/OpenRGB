@@ -55,11 +55,23 @@ inline std::string Sha256(const std::filesystem::path& path)
     static const char hex[]="0123456789ABCDEF";std::string result;result.reserve(64);
     for(const auto b:digest){result+=hex[b>>4];result+=hex[b&15];}return result;
 }
+struct SupportedBuild {
+    const char* version;
+    const char* executable_sha256;
+};
+// Each executable is accepted only with the shared, unchanged Qt binaries below.
+inline constexpr SupportedBuild supported_builds[]={
+    {"7.5.1.22901","9B2E3D0069052F18F372B9C9AEA46E925CB463ACBA443A1075E68EC5648F769D"},
+    {"7.6.1.23033","D9487481D42E5C8D13254C813D5C80158FB58D77C37E8C89036549F3AAE38618"}
+};
 inline void CheckBuild(DWORD pid)
 {
     if(!pid || !ExpectedProcess(pid))throw std::runtime_error("Expected Elgato process not found");
+    const auto executable_hash=Sha256(InstallDirectory()/L"StreamDeck.exe");
+    bool supported=false;
+    for(const auto& build:supported_builds)if(executable_hash==build.executable_sha256){supported=true;break;}
+    if(!supported)throw std::runtime_error("Unsupported Elgato build: a pinned SHA256 differs; attachment refused");
     const std::pair<const wchar_t*,const char*> files[]={
-        {L"StreamDeck.exe","9B2E3D0069052F18F372B9C9AEA46E925CB463ACBA443A1075E68EC5648F769D"},
         {L"Qt6Gui.dll","8FCEEE959A670372AAA5763287C2EF7924CD9ECDBE2C29CF4B6C12A63079C503"},
         {L"Qt6Core.dll","FAE4778A42E93ADC82B831C879C886A05147E9CC26760808D21116BE5547259B"}};
     for(const auto& entry:files)if(Sha256(InstallDirectory()/entry.first)!=entry.second)

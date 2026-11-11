@@ -51,6 +51,19 @@ et restauration acquittée. La découverte initiale a réussi sans changement de
 page. Cette première page avait quinze actions : le test ne valide pas à lui
 seul les cases vides de la nouvelle version.
 
+Installation validée le 11 novembre 2026 à 12:51 : DLL
+`B7C54A50E453B7BE7BFF87BE313214CDB5C49B536F6A90D2D04FF05519BCC601`
+issue du commit `de2c627a`. Le core, les plugins Effects/VisualMap et les
+77 fichiers JSON de configuration ont été conservés. Elgato est resté sur
+sa page : bootstrap réussi en une tentative, quinze touches rendues et
+injectées, dont quatre vides, zéro erreur et acquittements 142 à 222 sur cinq
+relevés successifs. L'utilisateur a confirmé le fond animé et les icônes
+corrects, y compris sur les cases vides, sans changement de page.
+
+L'ancienne instance OpenRGB est de nouveau restée bloquée après la demande de
+fermeture, pendant le nettoyage des périphériques. Seule sa tâche planifiée
+a été arrêtée pour libérer la DLL ; la cause de ce blocage distinct n'est pas
+identifiée et cette adaptation ne prétend pas la corriger.
 Pour une future mise à jour : conserver les anciens fichiers, identifier le
 nouveau build, comparer les fonctions/structures et leurs dépendances, ajouter
 un profil exact, puis valider les tests et le rendu réel (icônes, cases vides,
